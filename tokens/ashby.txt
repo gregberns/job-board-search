@@ -1,0 +1,26 @@
+# Ashby board tokens (manually curated 2026-04-01)
+airtable
+anduril
+assembled
+ashby
+brex
+dbt-labs
+deel
+faire
+figma
+grammarly
+lattice
+linear
+merge
+notion
+plaid
+ramp
+replit
+retool
+secureframe
+sourcegraph
+vercel
+verkada
+watershed
+webflow
+whatnot

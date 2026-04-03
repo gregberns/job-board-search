@@ -1,0 +1,3 @@
+[submodule "JobSpy"]
+	path = JobSpy
+	url = https://github.com/speedyapply/JobSpy.git

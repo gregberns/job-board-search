@@ -1,0 +1,1 @@
+- [Job search context](user_job_search.md) — SWE roles at US SMBs, building collection/filtering tooling
