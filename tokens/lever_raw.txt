@@ -250,3 +250,6 @@ zeta
 zignallabs
 zoox
 zotecpartners
+electric-twin
+blackshark
+findigs
