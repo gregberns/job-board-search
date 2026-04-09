@@ -1,0 +1,75 @@
+[
+  {
+    "id": "abc-123-def",
+    "text": "Senior Software Engineer",
+    "hostedUrl": "https://jobs.lever.co/acme/abc-123-def",
+    "applyUrl": "https://jobs.lever.co/acme/abc-123-def/apply",
+    "createdAt": 1712000000000,
+    "workplaceType": "unspecified",
+    "country": "US",
+    "categories": {
+      "commitment": "Full-time",
+      "department": "Engineering",
+      "location": "San Francisco, CA",
+      "team": "Platform"
+    },
+    "descriptionBody": "<p>We are looking for a senior engineer to join our platform team.</p>",
+    "description": "<p>Fallback description.</p>",
+    "lists": [
+      {
+        "text": "Requirements",
+        "content": "<ul><li>5+ years experience</li><li>Strong Python skills</li></ul>"
+      }
+    ],
+    "additionalPlain": "Compensation: $180,000 - $220,000 per year"
+  },
+  {
+    "id": "ghi-456-jkl",
+    "text": "Product Designer",
+    "hostedUrl": "https://jobs.lever.co/acme/ghi-456-jkl",
+    "applyUrl": null,
+    "createdAt": 1711900000000,
+    "workplaceType": "remote",
+    "categories": {
+      "commitment": "Full-time",
+      "department": "Design",
+      "location": "Remote"
+    },
+    "description": "<p>Join our design team. Salary range $120,000 - $160,000.</p>",
+    "lists": []
+  },
+  {
+    "id": "mno-789-pqr",
+    "text": "ML Intern",
+    "hostedUrl": "https://jobs.lever.co/acme/mno-789-pqr",
+    "createdAt": 1711800000000,
+    "workplaceType": "unspecified",
+    "categories": {
+      "commitment": "Internship",
+      "department": "Data",
+      "location": "New York, NY",
+      "team": "ML"
+    },
+    "description": "<p>Summer internship on our ML team.</p>",
+    "lists": []
+  },
+  {
+    "id": "stu-012-vwx",
+    "text": "DevOps Contractor",
+    "hostedUrl": "https://jobs.lever.co/acme/stu-012-vwx",
+    "createdAt": 1711700000000,
+    "workplaceType": "unspecified",
+    "categories": {
+      "commitment": "Contract",
+      "location": "Austin, TX"
+    },
+    "description": "<p>6-month contract for DevOps work.</p>",
+    "salaryRange": {
+      "min": 80,
+      "max": 120,
+      "currency": "USD",
+      "interval": "hourly"
+    },
+    "lists": []
+  }
+]
