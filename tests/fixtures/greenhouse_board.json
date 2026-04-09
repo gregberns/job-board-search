@@ -1,0 +1,54 @@
+{
+  "jobs": [
+    {
+      "id": 4012345,
+      "title": "Senior Software Engineer",
+      "updated_at": "2026-04-05T18:30:00-04:00",
+      "absolute_url": "https://boards.greenhouse.io/acme/jobs/4012345",
+      "location": {
+        "name": "San Francisco, CA"
+      },
+      "metadata": [],
+      "departments": [
+        {"id": 100, "name": "Engineering"}
+      ],
+      "offices": [
+        {"id": 1, "name": "San Francisco"}
+      ],
+      "first_published": "2026-04-01T10:00:00-04:00"
+    },
+    {
+      "id": 4012346,
+      "title": "Product Designer",
+      "updated_at": "2026-04-04T12:00:00-04:00",
+      "absolute_url": "https://boards.greenhouse.io/acme/jobs/4012346",
+      "location": {
+        "name": "Remote"
+      },
+      "metadata": [],
+      "departments": [
+        {"id": 200, "name": "Design"}
+      ],
+      "offices": [],
+      "first_published": "2026-03-28T09:00:00-04:00"
+    },
+    {
+      "id": 4012347,
+      "title": "Data Analyst",
+      "updated_at": "2026-04-06T08:00:00-04:00",
+      "absolute_url": "https://boards.greenhouse.io/acme/jobs/4012347",
+      "location": {
+        "name": "New York, NY"
+      },
+      "metadata": [],
+      "departments": [
+        {"id": 300, "name": "Data"},
+        {"id": 301, "name": "Analytics"}
+      ],
+      "offices": [
+        {"id": 2, "name": "New York"}
+      ],
+      "first_published": "2026-04-03T14:00:00-04:00"
+    }
+  ]
+}
