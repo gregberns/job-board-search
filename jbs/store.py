@@ -259,28 +259,21 @@ class Store:
             CREATE INDEX IF NOT EXISTS idx_hn_careers_status ON hn_career_pages(status);
         """)
 
-        # --- FTS5 ---
-        conn.execute("""CREATE VIRTUAL TABLE IF NOT EXISTS jobs_fts USING fts5(
-            title, company, description, domain,
-            content='',
-            tokenize='porter unicode61'
-        )""")
-        conn.execute("""CREATE TRIGGER IF NOT EXISTS jobs_ai AFTER INSERT ON jobs BEGIN
-            INSERT INTO jobs_fts(rowid, title, company, description, domain)
-            VALUES (new.rowid, new.title, new.company_raw, new.description, new.domain);
-        END""")
-        conn.execute("""CREATE TRIGGER IF NOT EXISTS jobs_ad AFTER DELETE ON jobs BEGIN
-            INSERT INTO jobs_fts(jobs_fts, rowid, title, company, description, domain)
-            VALUES ('delete', old.rowid, old.title, old.company_raw, old.description, old.domain);
-        END""")
-        conn.execute("""CREATE TRIGGER IF NOT EXISTS jobs_au AFTER UPDATE ON jobs BEGIN
-            INSERT INTO jobs_fts(jobs_fts, rowid, title, company, description, domain)
-            VALUES ('delete', old.rowid, old.title, old.company_raw, old.description, old.domain);
-            INSERT INTO jobs_fts(rowid, title, company, description, domain)
-            VALUES (new.rowid, new.title, new.company_raw, new.description, new.domain);
-        END""")
+        # --- Drop stale FTS artifacts before backfills ---
+        # Old DBs may have broken FTS tables/triggers from prior migrations.
+        # Drop them; we recreate clean ones after backfills.
+        for obj in ['jobs_ai', 'jobs_ad', 'jobs_au']:
+            conn.execute(f"DROP TRIGGER IF EXISTS {obj}")
+        for tbl in ['jobs_fts', 'jobs_fts_config', 'jobs_fts_data',
+                     'jobs_fts_docsize', 'jobs_fts_idx']:
+            try:
+                conn.execute(f"DROP TABLE IF EXISTS {tbl}")
+            except sqlite3.OperationalError:
+                pass
 
         # --- Backfill company_raw from company ---
+        # NOTE: FTS5 triggers are created AFTER all backfills (below) to avoid
+        # trigger-firing during migration UPDATEs on a contentless FTS table.
         try:
             conn.execute("""
                 UPDATE jobs SET company_raw = company
@@ -324,6 +317,32 @@ class Store:
             UPDATE jobs SET first_seen_run = run_id, last_seen_run = run_id
             WHERE first_seen_run IS NULL
         """)
+
+        # --- FTS5 (after all backfills to avoid trigger issues) ---
+        # Use content='jobs' so FTS reads from the jobs table directly.
+        # This avoids contentless FTS issues with DELETE operations.
+        conn.execute("""CREATE VIRTUAL TABLE IF NOT EXISTS jobs_fts USING fts5(
+            title, company, description, domain,
+            content='jobs', content_rowid='rowid',
+            tokenize='porter unicode61'
+        )""")
+        conn.execute("""CREATE TRIGGER IF NOT EXISTS jobs_ai AFTER INSERT ON jobs BEGIN
+            INSERT INTO jobs_fts(rowid, title, company, description, domain)
+            VALUES (new.rowid, new.title, new.company_raw, new.description, new.domain);
+        END""")
+        conn.execute("""CREATE TRIGGER IF NOT EXISTS jobs_ad AFTER DELETE ON jobs BEGIN
+            INSERT INTO jobs_fts(jobs_fts, rowid, title, company, description, domain)
+            VALUES ('delete', old.rowid, old.title, old.company_raw, old.description, old.domain);
+        END""")
+        conn.execute("""CREATE TRIGGER IF NOT EXISTS jobs_au AFTER UPDATE ON jobs BEGIN
+            INSERT INTO jobs_fts(jobs_fts, rowid, title, company, description, domain)
+            VALUES ('delete', old.rowid, old.title, old.company_raw, old.description, old.domain);
+            INSERT INTO jobs_fts(rowid, title, company, description, domain)
+            VALUES (new.rowid, new.title, new.company_raw, new.description, new.domain);
+        END""")
+
+        # Rebuild FTS index to catch existing rows
+        self.rebuild_fts()
 
         conn.commit()
 
