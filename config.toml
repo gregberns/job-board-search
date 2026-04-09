@@ -1,0 +1,4 @@
+[general]
+db_path = "data/jobs.db"
+default_sources = ["greenhouse", "lever", "ashby", "remoteok", "hn"]
+hours_old = 168
