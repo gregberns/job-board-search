@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-Job board scraper extending [JobSpy](https://github.com/Bunsly/JobSpy) with 5 new sources targeting small-to-medium businesses: **Greenhouse**, **Lever**, **Ashby**, **RemoteOK**, and **HN Who's Hiring**. Outputs JSONL files for downstream filtering.
+`jbs` — local-first CLI tool for finding engineering jobs. Scrapes 5 sources (Greenhouse, Lever, Ashby, RemoteOK, HN), stores in SQLite, enriches with LLM classification, provides search/filter/annotation.
 
 ## Quick Start
 
@@ -10,89 +10,94 @@ Job board scraper extending [JobSpy](https://github.com/Bunsly/JobSpy) with 5 ne
 # Activate the venv
 source JobSpy/.venv/bin/activate
 
-# Run all scrapers (uses tokens/ directory for ATS board lists)
-python run_search.py
+# Install jbs CLI
+pip install -e .
 
-# Run a single source
-python run_search.py --sources remoteok
+# Initialize DB and import tokens
+jbs init
 
-# Validate ATS tokens against live APIs (produces tokens/greenhouse.txt, tokens/lever.txt)
-python scripts/validate_tokens.py
+# Scrape all sources
+jbs scrape
 
-# Deduplicate a JSONL output file
-python scripts/dedup.py data/jobs_2026-04-01.jsonl
+# Enrich (free rules, then LLM via subscription)
+jbs enrich --stage rules
+jbs enrich --stage jobs
+jbs enrich --stage companies
+
+# Search
+jbs search --engineering --seniority senior,staff --ai-native 0.7
+jbs search "infrastructure" --remote --salary-min 200000
 ```
 
 ## Architecture
 
-### Directory Layout
+### Package Layout
 
 ```
-job-board-search/
-├── CLAUDE.md              # This file
-├── PLAN.md                # Full implementation plan with architecture decisions
-├── RESEARCH.md            # API research for all job board sources
-├── STATUS.md              # Task completion status and E2E test results
-├── run_search.py          # Main entry point — runs scrapers, writes JSONL, dedup
-├── scripts/
-│   ├── bootstrap_tokens.py  # Extract ATS tokens from awesome-easy-apply repo
-│   ├── validate_tokens.py   # Validate tokens against live APIs
-│   └── dedup.py             # Post-processing deduplication by (company, title)
-├── tokens/
-│   ├── greenhouse_raw.txt   # Raw tokens (540, unvalidated)
-│   ├── lever_raw.txt        # Raw tokens (251, unvalidated)
-│   └── ashby.txt            # Curated Ashby board names (25)
-├── data/                    # Output directory (created at runtime)
-└── JobSpy/                  # Forked JobSpy library (git submodule)
-    └── jobspy/
-        ├── __init__.py        # scrape_jobs() — main API, SCRAPER_MAPPING
-        ├── model.py           # Site enum, ScraperInput, JobPost, Scraper base
-        ├── ats_base.py        # ATSBoardScraper — shared base for ATS scrapers
-        ├── util.py            # filter_jobs, parse_location, extract_salary_from_text, html_to_markdown
-        ├── exception.py       # ScraperException + legacy per-site exceptions
-        ├── greenhouse/        # Two-pass fetch (metadata then detail), 20 workers
-        ├── lever/             # Rate-limited (0.5s, 2 workers), epoch-ms dates
-        ├── ashby/             # JSON control-char sanitization, structured compensation
-        ├── remoteok/          # Single API call, all-remote, salary/location parsing
-        └── hn/                # Algolia search_by_date, pipe-delimited comment parsing
+jbs/
+├── cli.py              # Click CLI, all commands
+├── config.py           # TOML config, defaults
+├── store.py            # All SQLite access (Store class)
+├── models.py           # Job, ScrapeResult, SearchQuery dataclasses
+├── orchestrator.py     # Sequential source execution
+├── enrich.py           # 4-stage enrichment pipeline
+├── enrich_rules.py     # Stage 1: seniority, salary, visa, llm_filter
+├── enrich_prompts.py   # LLM prompt templates
+├── llm_backend.py      # Claude CLI + Batch API backends
+├── discover.py         # HN token discovery
+├── util.py             # Shared helpers (normalize, parse, filter)
+└── scrapers/
+    ├── __init__.py     # @register decorator, plugin registry
+    ├── base.py         # ScraperPlugin ABC, PluginMeta, ScrapeContext
+    ├── ats_base.py     # ATSBoardScraper (threads, rate limiting)
+    ├── greenhouse.py   # Two-pass fetch, 10 workers
+    ├── lever.py        # Rate-limited, 2 workers
+    ├── ashby.py        # JSON sanitization, structured compensation
+    ├── remoteok.py     # Single API call
+    └── hn.py           # Algolia search, comment parsing
 ```
 
 ### Key Patterns
 
-- **ATSBoardScraper** (`ats_base.py`): Shared base for Greenhouse/Lever/Ashby. Subclasses implement `get_tokens()`, `fetch_board()`, `map_job()`. Base handles concurrency, rate limiting, error isolation per board.
-- **Client-side filtering**: All new scrapers fetch everything then filter via `filter_jobs()` in `util.py` (search_term, hours_old, is_remote).
-- **Incremental JSONL writes**: `run_search.py` writes after each source completes so partial results survive crashes.
-- **Two-pass Greenhouse**: Lightweight metadata first, full `content=true` only for matched jobs (saves ~90% bandwidth).
-- **ID prefixes**: Each scraper prefixes IDs (`gh-`, `lever-`, `ashby-`, `rok-`, `hn-`) for cross-source dedup.
-
-### Token Management
-
-ATS scrapers (Greenhouse, Lever, Ashby) require board token files in `tokens/`. The pipeline is:
-1. `scripts/bootstrap_tokens.py` — extracts raw tokens from awesome-easy-apply README
-2. `scripts/validate_tokens.py` — pings live APIs, writes validated `tokens/greenhouse.txt` and `tokens/lever.txt`
-3. `tokens/ashby.txt` — manually curated (no automated source)
-
-`run_search.py` prefers validated files and falls back to raw files.
-
-## Conventions
-
-- **Python 3.12** with the venv at `JobSpy/.venv/`
-- All new scrapers follow the existing JobSpy pattern: subclass `Scraper` (or `ATSBoardScraper`), implement `scrape()`, return `JobResponse`
-- `scrape_jobs()` in `JobSpy/jobspy/__init__.py` is the main API; new params are explicit kwargs (not buried in `**kwargs`)
-- JobPost IDs are prefixed with source name (e.g., `gh-12345`, `lever-abc123`)
-- Compensation is extracted from structured API data when available, falling back to `extract_salary_from_text()` on description
-- The `board_token` field on JobPost traces which ATS board a job came from
+- **Store** handles all DB access — no raw SQL elsewhere
+- **ATSBoardScraper** base for Greenhouse/Lever/Ashby with ThreadPoolExecutor, rate limiting, error isolation per board
+- **Scrapers never raise** — errors go in `ScrapeResult.errors`
+- **Company resolution at upsert time**: ATS token match → normalized name match → create new
+- **LLM pre-filter**: `llm_filter` column tags jobs as send/skip before LLM enrichment
+- **LLM backend**: Claude CLI (subscription) by default, Anthropic Batch API if ANTHROPIC_API_KEY set
+- **FTS5** for full-text search with content table triggers
 
 ## Running Tests
 
-No formal test suite yet. Verification is done via E2E runs:
 ```bash
-python run_search.py --sources remoteok --results-wanted 10
+source JobSpy/.venv/bin/activate
+python -m pytest tests/ --tb=short        # 518 tests
+python -m pytest tests/test_store.py -v   # Store only
+python -m pytest tests/test_enrich_rules.py -v  # Enrichment rules
 ```
+
+## CLI Commands
+
+```
+jbs init                          # Create DB, import tokens
+jbs scrape [--sources X]          # Run scrapers
+jbs enrich [--stage rules|jobs|companies] [--force] [--dry-run]
+jbs search [QUERY] [--engineering] [--seniority X] [--domain X] [--ai-native N] [--remote] [--salary-min N]
+jbs show <job-id> [--no-desc]     # Full job details
+jbs annotate <job-id> [--tag X] [--rating N] [--note X]
+jbs apply <job-id> [--stage X] [--list]
+jbs stats [--runs N]
+jbs tokens list|add|validate|discover
+```
+
+## Development Process
+
+See `plans/PROCESS.md`. Use `/spec` command for new features.
 
 ## Important Notes
 
-- **JobSpy is a git submodule** (has its own `.git`). Don't commit JobSpy changes to this repo's git — they're local modifications to the fork.
-- **Token files may contain stale entries** — expect 30-50% Greenhouse 404s and ~80% Lever 404s from raw tokens. Validated files are much cleaner.
-- **HN parsing is best-effort** — ~60% company name, ~50% location, ~30% salary extraction from unstructured comment text.
-- **RemoteOK can rate-limit** — uses proper User-Agent header; returns empty on 429.
+- **Venv** is at `JobSpy/.venv/` (historical, from the submodule era)
+- **JobSpy is a git submodule** — don't commit JobSpy changes to this repo
+- **Token files** in `tokens/` are an import source for `jbs init` — after init, DB is source of truth
+- **LLM enrichment** uses Claude subscription via `claude` CLI — no API key needed
+- **data/jobs.db** is in `.gitignore` — it's runtime data, not checked in

@@ -1,96 +1,78 @@
-# Project Status — jbs Rewrite
+# Project Status — jbs
 
 ## What This Is
 
-Rewriting a haphazard job board scraper (JobSpy submodule + scripts + flat files) into `jbs`, a clean local-first CLI tool for finding the right engineering job. Python 3.12, SQLite, Click + Rich CLI.
+`jbs` — a local-first CLI tool for finding the right engineering job. Scrapes 5 job board sources, stores in SQLite, enriches with LLM classification, and provides search/filter/annotation. Python 3.12, Click + Rich CLI, Claude Haiku for enrichment via subscription.
 
-**Current state:** The old scraper pipeline works (5 sources, 3,061 jobs in DB, enrichment via Haiku subagents). We are now designing the clean rewrite via specs before implementation.
+## Current State: Operational
 
-## Spec Status
+The `jbs` package is fully built and running. All 5 scrapers work, enrichment pipeline runs end-to-end, search with FTS5 is functional.
 
-| Spec | File | Status | Summary |
-|------|------|--------|---------|
-| 00 - Overview | `specs/00-overview.md` | **Done** | Vision, prerequisites, first-run (`jbs init` → `jbs scrape` → `jbs search`), token management, core workflow, data lifecycle. Updated for DB-based tokens and dual LLM backend. |
-| 01 - Architecture | `specs/01-architecture.md` | **Done** | Package structure (`jbs/`), scraper plugin system, orchestrator, token-in-DB architecture, CLI command tree, error handling, migration path. No JobSpy submodule. |
-| 02 - Data Model | `specs/02-data-model.md` | **Done** | 8 tables. Companies are first-class (ATS tokens as columns). Objective/subjective data separation. Company resolution algorithm. Token lifecycle. Full schema + indexes + migration. |
-| 03 - CLI UX | `specs/03-cli-ux.md` | **Done** | 10 commands: init, scrape, search, show, enrich, annotate, apply, stats, tokens (validate/add/list/discover). Aligned with specs 01/02/05. Dual LLM backend, DB-based tokens, `job_annotations`/`company_preferences`. |
-| 04 - Search & Ranking | `specs/04-search-ranking.md` | **Done** | FTS5 + structured filters + ranking formula. JOINs through company_id for industry/ai_native. `company_preferences` for ranking. `engineering_only` opt-in. `include_inactive`. Normalized salary. `job_summary` in results. |
-| 05 - Enrichment | `specs/05-enrichment.md` | **Done** | 4-stage pipeline: cleanup, rules, LLM jobs, LLM companies. Dual LLM backend: Agent SDK (default, uses subscription) + Batch API (optional fast path with API key). Individual classification with full descriptions via Batch API; batched 20/call with 2KB truncation via Agent SDK. |
-| HN Careers | `specs/hn-careers-pipeline.md` | **Done** | Token discovery as `jbs tokens discover`. 3 phases: harvest ATS tokens, discover careers pages, detect ATS on careers pages. Integrated into jbs architecture. Phase 4 (custom extraction) deferred to v2. |
+### Database (data/jobs.db)
+- **4,801 jobs** (4,292 active, 509 inactive)
+- **1,212 companies** (1,181 enriched with ai_native, industry, description)
+- **1,253 engineering roles** identified by LLM
+- **1,070 job summaries** generated
+- **584 valid tokens**, 279 stale, 0 unchecked
+- Sources: Greenhouse (3,239), HN (624), Lever (557), Ashby (301), RemoteOK (80)
 
-## Key Design Decisions Made
+### LLM Pre-Filter
+Jobs are pre-classified before LLM enrichment to reduce cost:
+- 2,227 pass → sent to LLM
+- 1,211 skip_mgmt, 920 skip_title, 296 skip_salary, 147 skip_seniority
 
-### Data Model (Spec 02)
-- **Companies are first-class entities** with `id`, `name`, `name_normalized` (dedup key)
-- **One ATS platform per company**: `ats_platform` (greenhouse/lever/ashby) + `ats_token` (board slug), with `UNIQUE(ats_platform, ats_token)`
-- **Tokens live in the DB**, not flat files. `companies` table IS the token registry. `token_status`: unchecked → valid / stale
-- **Objective vs subjective separation**: `companies` (facts) vs `company_preferences` (user opinions). `jobs` (facts) vs `job_annotations` + `job_tags` (user opinions)
-- **Company resolution at scrape time**: ATS token match → normalized name match → create new record
-- **`name_normalized`**: lowercase, strip corporate suffixes (Inc/LLC/Ltd/Corp/PBC/GmbH), remove non-alphanumeric
-- **No `company_aliases` table** — one normalized name per company, keep it simple
-- **`company_raw` on jobs** — keep original scraper string for debugging
+### What Works
+- `jbs init` — create DB, import tokens from flat files
+- `jbs scrape` — all 5 sources (Greenhouse, Lever, Ashby, RemoteOK, HN)
+- `jbs enrich --stage rules` — free rule-based extraction (seniority, salary, visa, years_exp, management, llm_filter)
+- `jbs enrich --stage jobs` — LLM job classification via Claude CLI (engineering_role, domain, tech_stack, job_summary)
+- `jbs enrich --stage companies` — LLM company enrichment (ai_native, industry, funding_stage, description)
+- `jbs search` — FTS5 + structured filters (--engineering, --seniority, --domain, --ai-native, --salary-min, --remote, etc.)
+- `jbs show <job-id>` — full job details
+- `jbs annotate` — tags, rating, notes, pros/cons
+- `jbs apply` — application tracking
+- `jbs stats` — database overview
+- `jbs tokens list/add/validate` — token management
 
-### Architecture (Spec 01)
-- **No JobSpy submodule** — inline ~6 utilities, rewrite scrapers as `jbs/scrapers/*.py`
-- **`@register` decorator** with explicit imports, no magic discovery
-- **Sequential sources, concurrent boards** — sources run one at a time (clean logging), each ATS source uses ThreadPoolExecutor internally
-- **Threads, not asyncio** — requests is synchronous, thread pools fit I/O-bound HTTP
-- **Scrapers never raise** — errors go in `ScrapeResult.errors`
-- **Rate limiting hardcoded per scraper**: Greenhouse 50ms/10 workers, Lever 500ms/2 workers, Ashby 0ms/10 workers
-- **`jbs init`** imports tokens from flat files (one-time). `jbs tokens validate` pings APIs. `jbs tokens add` for manual additions.
-- **Store class** handles all DB access — no raw SQL elsewhere
+### Known Issues
+- Salary regex overmatch on some Greenhouse postings (e.g. SimpliSafe `$172,000,000`)
+- Some company names are slug-derived (not yet updated from API responses)
+- `jbs tokens validate` not yet tested end-to-end
+- `jbs tokens discover` not yet tested end-to-end
+- 518 tests passing, 1 skipped (migration test on corrupted DB)
 
-### Enrichment (Spec 05)
-- **Dual LLM backend**: Claude Agent SDK (default, uses subscription) + Anthropic Batch API (optional, requires API key)
-- **Agent SDK**: batches 20 jobs per call, 2KB description truncation, ~7 min for 3000 jobs
-- **Batch API**: individual calls with full descriptions, ~5 min for 3000 jobs, ~$1.20
-- **Stage 0**: Fix Greenhouse HTML (stored as raw HTML), RemoteOK encoding (78% broken Unicode), boilerplate stripping (in memory, not persisted)
-- **Stage 1 (rules, free)**: seniority from title, is_management, salary normalization + FX conversion, visa_sponsorship (~10 regex patterns), years_experience
-- **Stage 2 (LLM jobs)**: engineering_role, seniority refinement, domain, tech_stack, job_summary (1-2 sentence summary — highest-value new feature)
-- **Stage 3 (LLM companies)**: description, industry, ai_native (0.0-1.0), funding_stage, size_estimate
-- **Tech stack extraction by LLM**, not regex — catches semantic references regex misses
-- **`enriched_at` watermark** on jobs and companies. `--force` flag for re-enrichment.
-- **User feedback loop deferred to v2** — store annotations now, compute preference profile after 50+ annotations
+## Specs
 
-### Filtering (Spec 04 — needs revision)
-- Replace boolean `engineering_only` with generic category-based filtering
-- User should be able to set default filters (e.g., "never show sales/marketing jobs") that persist
-- Unknown values should be ranked neutrally, not penalized or hidden
-- FTS5 for text search, structured filters for everything else
-- Simple hardcoded ranking formula (not configurable)
+All 7 specs finalized in `specs/`:
+- 00-overview, 01-architecture, 02-data-model, 03-cli-ux, 04-search-ranking, 05-enrichment, hn-careers-pipeline
 
-## What Needs To Happen Next
+Pre-filter spec in `specs/2026-04-pre-filter/`.
 
-### All specs are finalized. Implementation is next.
+## Implementation
 
-**Implementation plan:** See `plans/jbs/beads.md` for the full bead breakdown — 16 beads across 5 layers.
+16 beads completed, tracked in `bd`. See `plans/jbs/beads.md` for the breakdown.
 
-**Summary of layers:**
-- **L0 (Foundation):** Package scaffold, data models, utilities
-- **L1 (Core):** Store (full schema), scraper plugin system
-- **L2 (Scrapers):** Greenhouse, Lever, Ashby, RemoteOK, HN (parallel)
-- **L3 (Integration):** Orchestrator, enrichment, HN discovery, CLI
-- **L4 (Polish):** FTS5 search + ranking, data migration + E2E test
+Post-build fixes:
+- FTS5 content table (was contentless, broke UPDATE triggers)
+- Salary magnitude heuristic ($154-190,000 → $154k-$190k)
+- Token valid-after-scrape marking
+- Claude CLI backend (replaces broken Agent SDK)
+- CLI comma-separated filter parsing
+- Incremental DB commits during enrichment
 
-## Existing Codebase (what works today)
+## Development Process
 
-### Database
-- `data/jobs.db` — 3,061 jobs, 575+ companies, 5 runs
-- Sources: Greenhouse (1,907), HN (574), Lever (325), Ashby (200), RemoteOK (55)
-- 1,795 jobs classified (engineering_role, seniority, domain)
-- 572 companies enriched (description, industry, ai_native)
+See `plans/PROCESS.md`. Commands in `.claude/commands/`:
+- `/spec` — collaborative spec pipeline (problem space → decompose → research → spec → assembly)
+- `/plan-implementation` — break specs into beads
+- `/implement-beads` — execute beads with worker pairs
+- `/spawn-workers` — ntm worker management
 
-### Scrapers (in JobSpy submodule, will be rewritten)
-- All 5 sources working: Greenhouse, Lever, Ashby, RemoteOK, HN
-- Token files: 540 Greenhouse raw, 251 Lever raw, 25 Ashby curated
-- 404 tracking: greenhouse_404.txt (44), lever_404.txt (36), ashby_404.txt (2)
-- HN careers pipeline discovered 64 additional ATS tokens
+## What Could Come Next
 
-### Known Data Quality Issues (to fix during rewrite)
-- Greenhouse descriptions stored as raw HTML (not markdown)
-- RemoteOK ~78% broken Unicode encoding
-- Ashby structured salary not being captured (API has it, scraper doesn't extract)
-- Salary extraction only captures 8-27% depending on source
-- Two different company normalization functions with different behavior
-- HN 53% NULL descriptions (inherent to source — comments, not postings)
-- 42-71% of Greenhouse/Ashby descriptions have legal boilerplate
+- **Daily scrape cron** — `jbs scrape && jbs enrich --stage rules` on a schedule
+- **Token discovery** — `jbs tokens discover` to harvest new ATS tokens from HN
+- **Token validation** — `jbs tokens validate` to clean up stale tokens
+- **Salary regex fix** — handle Greenhouse salary format edge cases
+- **Search UX polish** — better table formatting, `--format table` column widths
+- **v2 features** — user preference profiles from annotations, saved searches, HN careers page extraction
