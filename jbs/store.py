@@ -259,6 +259,27 @@ class Store:
             CREATE INDEX IF NOT EXISTS idx_hn_careers_status ON hn_career_pages(status);
         """)
 
+        # --- FTS5 ---
+        conn.execute("""CREATE VIRTUAL TABLE IF NOT EXISTS jobs_fts USING fts5(
+            title, company, description, domain,
+            content='',
+            tokenize='porter unicode61'
+        )""")
+        conn.execute("""CREATE TRIGGER IF NOT EXISTS jobs_ai AFTER INSERT ON jobs BEGIN
+            INSERT INTO jobs_fts(rowid, title, company, description, domain)
+            VALUES (new.rowid, new.title, new.company_raw, new.description, new.domain);
+        END""")
+        conn.execute("""CREATE TRIGGER IF NOT EXISTS jobs_ad AFTER DELETE ON jobs BEGIN
+            INSERT INTO jobs_fts(jobs_fts, rowid, title, company, description, domain)
+            VALUES ('delete', old.rowid, old.title, old.company_raw, old.description, old.domain);
+        END""")
+        conn.execute("""CREATE TRIGGER IF NOT EXISTS jobs_au AFTER UPDATE ON jobs BEGIN
+            INSERT INTO jobs_fts(jobs_fts, rowid, title, company, description, domain)
+            VALUES ('delete', old.rowid, old.title, old.company_raw, old.description, old.domain);
+            INSERT INTO jobs_fts(rowid, title, company, description, domain)
+            VALUES (new.rowid, new.title, new.company_raw, new.description, new.domain);
+        END""")
+
         # --- Backfill company_raw from company ---
         try:
             conn.execute("""
@@ -330,6 +351,24 @@ class Store:
                     "UPDATE jobs SET company_id = ? WHERE id = ?",
                     (norm_to_id[norm], row["id"]),
                 )
+
+    # ------------------------------------------------------------------
+    # FTS5
+    # ------------------------------------------------------------------
+
+    def rebuild_fts(self) -> int:
+        """Full rebuild of FTS5 index from jobs table. Returns row count."""
+        conn = self._conn()
+        conn.execute("INSERT INTO jobs_fts(jobs_fts) VALUES('delete-all')")
+        conn.execute(
+            "INSERT INTO jobs_fts(rowid, title, company, description, domain) "
+            "SELECT rowid, title, company_raw, description, domain FROM jobs"
+        )
+        count = conn.execute(
+            "SELECT COUNT(*) AS n FROM jobs WHERE 1=1"
+        ).fetchone()["n"]
+        conn.commit()
+        return count
 
     # ------------------------------------------------------------------
     # Run tracking
@@ -710,7 +749,7 @@ class Store:
     # ------------------------------------------------------------------
 
     def search(self, query: SearchQuery) -> list[dict]:
-        """Search jobs with structured filters. Basic LIKE fallback for text (no FTS)."""
+        """Search jobs with structured filters and FTS5 full-text search."""
         conn = self._conn()
         params: list = []
         where: list[str] = []
@@ -724,11 +763,11 @@ class Store:
         if not query.include_inactive:
             where.append("j.is_active = 1")
 
-        # Text search (LIKE fallback — FTS5 is Bead 4a)
+        # FTS5 text search
         if query.text:
-            where.append("(j.title LIKE ? OR j.description LIKE ? OR j.company_raw LIKE ?)")
-            like_term = f"%{query.text}%"
-            params.extend([like_term, like_term, like_term])
+            joins.append("JOIN jobs_fts ON jobs_fts.rowid = j.rowid")
+            where.append("jobs_fts MATCH ?")
+            params.append(query.text)
 
         # Structured filters on jobs
         for field, vals in [
@@ -797,14 +836,24 @@ class Store:
 
         where_clause = " AND ".join(where) if where else "1=1"
 
-        # Ranking score (no FTS version)
-        score = """(
-            CASE WHEN j.salary_usd_min IS NOT NULL OR j.min_amount IS NOT NULL THEN 0.1 ELSE 0 END
-          + CASE WHEN COALESCE(c.ai_native, 0) > 0.7 THEN 0.1 ELSE 0 END
-          + CASE WHEN COALESCE(cp.rating, 0) > 3 THEN 0.1 ELSE 0 END
-          - CASE WHEN COALESCE(cp.rating, 99) <= 2 THEN 0.3 ELSE 0 END
-        ) AS score"""
-        order = "j.date_posted DESC, score DESC"
+        # Ranking score
+        if query.text:
+            score = """(
+                (1.0 / (1.0 + ABS(jobs_fts.rank)))
+              + CASE WHEN j.salary_usd_min IS NOT NULL OR j.min_amount IS NOT NULL THEN 0.1 ELSE 0 END
+              + CASE WHEN COALESCE(c.ai_native, 0) > 0.7 THEN 0.1 ELSE 0 END
+              + CASE WHEN COALESCE(cp.rating, 0) > 3 THEN 0.1 ELSE 0 END
+              - CASE WHEN COALESCE(cp.rating, 99) <= 2 THEN 0.3 ELSE 0 END
+            ) AS score"""
+            order = "score DESC, j.date_posted DESC"
+        else:
+            score = """(
+                CASE WHEN j.salary_usd_min IS NOT NULL OR j.min_amount IS NOT NULL THEN 0.1 ELSE 0 END
+              + CASE WHEN COALESCE(c.ai_native, 0) > 0.7 THEN 0.1 ELSE 0 END
+              + CASE WHEN COALESCE(cp.rating, 0) > 3 THEN 0.1 ELSE 0 END
+              - CASE WHEN COALESCE(cp.rating, 99) <= 2 THEN 0.3 ELSE 0 END
+            ) AS score"""
+            order = "j.date_posted DESC, score DESC"
 
         sql = f"""SELECT j.*, COALESCE(c.name, j.company_raw) AS company_name,
                          c.industry, c.ai_native, j.job_summary, {score}
@@ -840,6 +889,31 @@ class Store:
         ).fetchall()
         result["tags"] = [t["tag"] for t in tags]
         return result
+
+    def find_similar(self, job_id: str, limit: int = 20) -> list[dict]:
+        """Find structurally similar jobs based on domain, seniority, work_arrangement."""
+        conn = self._conn()
+        ref = conn.execute(
+            "SELECT domain, seniority, work_arrangement FROM jobs WHERE id = ?",
+            (job_id,),
+        ).fetchone()
+        if ref is None:
+            return []
+
+        domain, seniority, work_arr = ref["domain"], ref["seniority"], ref["work_arrangement"]
+
+        sql = """SELECT j.*, COALESCE(c.name, j.company_raw) AS company_name,
+                        j.job_summary, (
+              0.50 * (j.domain = ?)
+            + 0.30 * (j.seniority = ?)
+            + 0.20 * (j.work_arrangement = ?)
+            ) AS similarity
+            FROM jobs j
+            LEFT JOIN companies c ON c.id = j.company_id
+            WHERE j.id != ? AND j.is_active = 1
+            ORDER BY similarity DESC, j.date_posted DESC LIMIT ?"""
+        rows = conn.execute(sql, [domain, seniority, work_arr, job_id, limit]).fetchall()
+        return [dict(r) for r in rows]
 
     def get_stats(self) -> dict:
         conn = self._conn()
