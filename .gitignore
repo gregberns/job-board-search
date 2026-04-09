@@ -28,3 +28,8 @@ data/
 
 # JobSpy venv (submodule)
 JobSpy/.venv/
+
+# Beads / Dolt files (added by bd init)
+.dolt/
+*.db
+.beads-credential-key

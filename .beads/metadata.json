@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "server",
+  "dolt_database": "job_board_search",
+  "project_id": "debfd374-ac24-4b42-ab18-821628caab40"
+}
