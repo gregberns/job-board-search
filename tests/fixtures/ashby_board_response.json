@@ -1,0 +1,70 @@
+{
+  "organizationName": "Acme Corp",
+  "jobs": [
+    {
+      "id": "job-001",
+      "title": "Senior Backend Engineer",
+      "location": "San Francisco, CA",
+      "isRemote": false,
+      "employmentType": "FullTime",
+      "department": "Engineering",
+      "team": "Platform",
+      "jobUrl": "https://jobs.ashbyhq.com/acme/job-001",
+      "applyUrl": "https://jobs.ashbyhq.com/acme/job-001/apply",
+      "publishedAt": "2026-04-01T12:00:00Z",
+      "descriptionHtml": "<p>We are looking for a <strong>Senior Backend Engineer</strong> to join our team.</p>",
+      "compensationTiers": [
+        {
+          "title": "Base Salary",
+          "components": [
+            {
+              "minValue": 150000,
+              "maxValue": 200000,
+              "currencyCode": "USD",
+              "interval": "YEAR"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "job-002",
+      "title": "Product Designer",
+      "location": "Remote",
+      "isRemote": true,
+      "workplaceType": "Remote",
+      "employmentType": "Full-Time",
+      "department": "Design",
+      "jobUrl": "https://jobs.ashbyhq.com/acme/job-002",
+      "publishedAt": "2026-04-02T08:30:00Z",
+      "descriptionPlain": "Join our design team to create beautiful experiences. Salary range: $120k - $160k."
+    },
+    {
+      "id": "job-003",
+      "title": "Data Science Intern",
+      "location": "New York, NY",
+      "employmentType": "Internship",
+      "department": "Data",
+      "team": "ML",
+      "jobUrl": "https://jobs.ashbyhq.com/acme/job-003",
+      "publishedAt": "2026-03-28",
+      "descriptionHtml": "<p>Summer internship in data science.</p>"
+    },
+    {
+      "id": "job-004",
+      "title": "DevOps Engineer",
+      "location": "Austin, TX",
+      "isRemote": false,
+      "employmentType": "Contract",
+      "jobUrl": "https://jobs.ashbyhq.com/acme/job-004",
+      "publishedAt": "2026-04-05T14:00:00Z",
+      "descriptionHtml": "<p>Contract role for DevOps.</p>",
+      "compensation": {
+        "minValue": 80,
+        "maxValue": 120,
+        "currencyCode": "USD",
+        "interval": "HOUR"
+      }
+    }
+  ]
+}
