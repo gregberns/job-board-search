@@ -211,6 +211,7 @@ class Store:
             ("jobs", "visa_sponsorship", "TEXT"),
             ("jobs", "years_experience", "INTEGER"),
             ("jobs", "is_management", "BOOLEAN"),
+            ("jobs", "llm_filter", "TEXT"),
             ("companies", "ats_platform", "TEXT"),
             ("companies", "ats_token", "TEXT"),
             ("companies", "token_status", "TEXT DEFAULT 'unchecked'"),

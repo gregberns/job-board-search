@@ -3,6 +3,7 @@
 import pytest
 
 from jbs.enrich_rules import (
+    classify_llm_filter,
     extract_is_management,
     extract_seniority,
     extract_visa,
@@ -253,3 +254,108 @@ class TestNormalizeTechStack:
     def test_preserves_order(self):
         result = normalize_tech_stack(["Python", "Go", "Rust"])
         assert result == ["Python", "Go", "Rust"]
+
+
+# ---------------------------------------------------------------------------
+# classify_llm_filter
+# ---------------------------------------------------------------------------
+
+
+class TestClassifyLlmFilter:
+    """Test the LLM pre-classification filter."""
+
+    # --- Management ---
+    def test_management_skipped(self):
+        assert classify_llm_filter("Engineering Manager", True, "senior", 250000, None) == "skip_mgmt"
+
+    def test_director_skipped(self):
+        assert classify_llm_filter("Director of Engineering", True, None, None, None) == "skip_mgmt"
+
+    # --- Non-engineering titles ---
+    def test_sales_skipped(self):
+        assert classify_llm_filter("Sales Representative", False, None, None, None) == "skip_title"
+
+    def test_marketing_skipped(self):
+        assert classify_llm_filter("Marketing Manager", False, None, None, None) == "skip_title"
+
+    def test_recruiter_skipped(self):
+        assert classify_llm_filter("Technical Recruiter", False, None, None, None) == "skip_title"
+
+    def test_product_manager_skipped(self):
+        assert classify_llm_filter("Senior Product Manager", False, "senior", 250000, None) == "skip_title"
+
+    def test_data_scientist_skipped(self):
+        assert classify_llm_filter("Senior Data Scientist", False, "senior", 200000, None) == "skip_title"
+
+    def test_designer_skipped(self):
+        assert classify_llm_filter("Senior UX Designer", False, "senior", None, None) == "skip_title"
+
+    def test_solutions_engineer_skipped(self):
+        assert classify_llm_filter("Solutions Engineer", False, None, 200000, None) == "skip_title"
+
+    def test_support_engineer_skipped(self):
+        assert classify_llm_filter("Technical Support Engineer", False, None, None, None) == "skip_title"
+
+    # --- Keep overrides ---
+    def test_ai_engineer_kept(self):
+        assert classify_llm_filter("AI Engineer", False, None, None, None) == "send"
+
+    def test_ml_engineer_kept(self):
+        assert classify_llm_filter("Senior ML Engineer", False, "senior", 250000, None) == "send"
+
+    def test_machine_learning_engineer_kept(self):
+        assert classify_llm_filter("Machine Learning Engineer", False, None, None, None) == "send"
+
+    # --- Salary filter ---
+    def test_low_salary_skipped(self):
+        assert classify_llm_filter("Software Engineer", False, None, 150000, None) == "skip_salary"
+
+    def test_low_salary_from_max_amount(self):
+        assert classify_llm_filter("Software Engineer", False, None, None, 100000) == "skip_salary"
+
+    def test_high_salary_passes(self):
+        assert classify_llm_filter("Software Engineer", False, None, 200000, None) == "send"
+
+    def test_no_salary_passes(self):
+        assert classify_llm_filter("Software Engineer", False, None, None, None) == "send"
+
+    # --- Seniority filter ---
+    def test_intern_skipped(self):
+        assert classify_llm_filter("Software Engineering Intern", False, "intern", None, None) == "skip_seniority"
+
+    def test_junior_skipped(self):
+        assert classify_llm_filter("Junior Developer", False, "junior", None, None) == "skip_seniority"
+
+    def test_senior_passes(self):
+        assert classify_llm_filter("Senior Software Engineer", False, "senior", 250000, None) == "send"
+
+    def test_staff_passes(self):
+        assert classify_llm_filter("Staff Engineer", False, "staff", None, None) == "send"
+
+    # --- Engineering titles that should pass ---
+    def test_software_engineer_passes(self):
+        assert classify_llm_filter("Software Engineer", False, None, None, None) == "send"
+
+    def test_backend_developer_passes(self):
+        assert classify_llm_filter("Backend Developer", False, None, None, None) == "send"
+
+    def test_sre_passes(self):
+        assert classify_llm_filter("Site Reliability Engineer", False, None, None, None) == "send"
+
+    def test_platform_engineer_passes(self):
+        assert classify_llm_filter("Platform Engineer", False, None, None, None) == "send"
+
+    def test_data_engineer_passes(self):
+        assert classify_llm_filter("Data Engineer", False, None, None, None) == "send"
+
+    # --- Priority: management checked before title ---
+    def test_management_trumps_title(self):
+        # "Sales Manager" could match both mgmt and title, mgmt wins
+        assert classify_llm_filter("Sales Manager", True, None, None, None) == "skip_mgmt"
+
+    # --- Ambiguous titles pass through ---
+    def test_ambiguous_title_passes(self):
+        assert classify_llm_filter("Analyst III", False, None, None, None) == "send"
+
+    def test_unknown_role_passes(self):
+        assert classify_llm_filter("Maker of Things", False, None, None, None) == "send"

@@ -112,6 +112,71 @@ def extract_years_experience(description: str) -> int | None:
 
 
 # ---------------------------------------------------------------------------
+# LLM pre-filter classification
+# ---------------------------------------------------------------------------
+
+# Titles containing these are kept even if they match an exclude pattern.
+_TITLE_KEEP = re.compile(
+    r'\b(?:ai engineer|ml engineer|machine learning engineer)\b',
+    re.IGNORECASE,
+)
+
+# Titles containing any of these → skip_title (non-engineering or adjacent).
+_TITLE_EXCLUDE = re.compile(
+    r'(?:'
+    r'sales|marketing|recruiter|talent acq|human resource|'
+    r'accountant|finance manager|financial analyst|'
+    r'legal counsel|general counsel|paralegal|'
+    r'customer success|account executive|business develop|'
+    r'copywriter|content writer|'
+    r'nurse|physician|therapist|pharmacist|receptionist|'
+    r'warehouse|maintenance tech|'
+    r'data scientist|data analyst|'
+    r'product manager|program manager|project manager|'
+    r'\bdesigner\b|'
+    r'solutions engineer|support engineer|field engineer|'
+    r'implementation|customer engineer'
+    r')',
+    re.IGNORECASE,
+)
+
+_SALARY_FLOOR = 190_000
+
+
+def classify_llm_filter(
+    title: str,
+    is_management: bool,
+    seniority: str | None,
+    salary_usd_max: float | None,
+    max_amount: float | None,
+) -> str:
+    """Classify whether a job should be sent to LLM enrichment.
+
+    Returns one of: 'send', 'skip_mgmt', 'skip_title', 'skip_salary', 'skip_seniority'.
+    Filters applied in priority order (first match wins).
+    Always recomputed — not gated on prior value.
+    """
+    # 1. Management
+    if is_management:
+        return 'skip_mgmt'
+
+    # 2. Non-engineering title (unless keep-override matches)
+    if not _TITLE_KEEP.search(title) and _TITLE_EXCLUDE.search(title):
+        return 'skip_title'
+
+    # 3. Low salary (only when salary is known)
+    effective_max = salary_usd_max or max_amount
+    if effective_max is not None and effective_max < _SALARY_FLOOR:
+        return 'skip_salary'
+
+    # 4. Junior/intern seniority
+    if seniority in ('intern', 'junior'):
+        return 'skip_seniority'
+
+    return 'send'
+
+
+# ---------------------------------------------------------------------------
 # Tech stack normalization (post-LLM)
 # ---------------------------------------------------------------------------
 

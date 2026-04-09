@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 
 from jbs.enrich_prompts import JOB_SYSTEM_PROMPT, COMPANY_SYSTEM_PROMPT
 from jbs.enrich_rules import (
+    classify_llm_filter,
     extract_is_management,
     extract_seniority,
     extract_visa,
@@ -112,12 +113,13 @@ class EnrichmentPipeline:
         where_clause = " AND ".join(where_parts) if where_parts else "1=1"
 
         rows = conn.execute(
-            f"""SELECT id, title, description, min_amount, max_amount, currency, salary_interval
+            f"""SELECT id, title, description, min_amount, max_amount, currency,
+                       salary_interval, salary_usd_max, seniority, is_management
                 FROM jobs WHERE {where_clause}""",
             params,
         ).fetchall()
 
-        counts = {"seniority": 0, "visa": 0, "salary": 0, "years_exp": 0, "management": 0}
+        counts = {"seniority": 0, "visa": 0, "salary": 0, "years_exp": 0, "management": 0, "llm_send": 0}
         now = _now_iso()
 
         for row in rows:
@@ -158,6 +160,19 @@ class EnrichmentPipeline:
                     updates["years_experience"] = yrs
                     counts["years_exp"] += 1
 
+            # LLM pre-filter (always recomputed, not gated on prior value)
+            if row["title"]:
+                llm_f = classify_llm_filter(
+                    title=row["title"],
+                    is_management=updates.get("is_management", row["is_management"]),
+                    seniority=updates.get("seniority", row["seniority"]),
+                    salary_usd_max=updates.get("salary_usd_max", row["salary_usd_max"]),
+                    max_amount=row["max_amount"],
+                )
+                updates["llm_filter"] = llm_f
+                if llm_f == "send":
+                    counts["llm_send"] += 1
+
             # Always set enriched_at
             updates["enriched_at"] = now
 
@@ -170,9 +185,9 @@ class EnrichmentPipeline:
 
         conn.commit()
         log.info(
-            "Stage 1: %d jobs — seniority=%d visa=%d salary=%d years_exp=%d management=%d",
+            "Stage 1: %d jobs — seniority=%d visa=%d salary=%d years_exp=%d management=%d llm_send=%d",
             len(rows), counts["seniority"], counts["visa"],
-            counts["salary"], counts["years_exp"], counts["management"],
+            counts["salary"], counts["years_exp"], counts["management"], counts["llm_send"],
         )
         return len(rows), counts
 
@@ -203,6 +218,8 @@ class EnrichmentPipeline:
         params: list = []
         if not force:
             where_parts.append("engineering_role IS NULL")
+            # Respect pre-filter: only send jobs marked 'send' or not yet filtered
+            where_parts.append("(llm_filter = 'send' OR llm_filter IS NULL)")
         if source:
             where_parts.append("site = ?")
             params.append(source)
