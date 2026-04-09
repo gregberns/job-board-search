@@ -1,0 +1,54 @@
+{
+  "id": 99001,
+  "title": "Ask HN: Who is hiring? (April 2026)",
+  "children": [
+    {
+      "id": 99101,
+      "text": "Acme Corp | Senior Backend Engineer | San Francisco, CA | $180k-$250k | ONSITE | https://acme.example.com/jobs<p>We&#x27;re building the next generation of widgets. Python, PostgreSQL, Redis.</p>",
+      "author": "acme_hiring",
+      "created_at_i": 1775063000,
+      "created_at": "2026-04-01T15:03:20.000Z",
+      "children": []
+    },
+    {
+      "id": 99102,
+      "text": "WidgetLabs | Full Stack Developer | Remote | $150k-$200k<p>React + Node.js shop. Fully remote, async-first culture.</p><p>Apply: https://widgetlabs.example.com/apply</p>",
+      "author": "widgetlabs",
+      "created_at_i": 1775063600,
+      "created_at": "2026-04-01T15:13:20.000Z",
+      "children": []
+    },
+    {
+      "id": 99103,
+      "text": "DataFlow Inc | ML Engineer | NYC or Remote | $200k-$300k | https://dataflow.example.com<p>Working on large-scale data pipelines. Experience with Spark and ML required.</p>",
+      "author": "dataflow",
+      "created_at_i": 1775064200,
+      "created_at": "2026-04-01T15:23:20.000Z",
+      "children": []
+    },
+    {
+      "id": 99104,
+      "text": "This is a comment with no pipe delimiters, just someone chatting about the job market and how things are going lately.",
+      "author": "randomuser",
+      "created_at_i": 1775064800,
+      "created_at": "2026-04-01T15:33:20.000Z",
+      "children": []
+    },
+    {
+      "id": 99105,
+      "text": "",
+      "author": "deleted",
+      "created_at_i": 1775065000,
+      "created_at": "2026-04-01T15:36:40.000Z",
+      "children": []
+    },
+    {
+      "id": 99106,
+      "text": "NeuralPay | London, UK | Hybrid<p>Building AI-powered payment infrastructure. Looking for backend engineers.</p><p>Contact: jobs@neuralpay.example.com</p>",
+      "author": "neuralpay",
+      "created_at_i": 1775065600,
+      "created_at": "2026-04-01T15:46:40.000Z",
+      "children": []
+    }
+  ]
+}

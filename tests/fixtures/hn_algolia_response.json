@@ -1,0 +1,24 @@
+{
+  "hits": [
+    {
+      "created_at": "2026-04-01T15:00:00.000Z",
+      "title": "Ask HN: Who is hiring? (April 2026)",
+      "url": null,
+      "author": "whoishiring",
+      "points": 500,
+      "story_text": null,
+      "comment_text": null,
+      "num_comments": 350,
+      "story_id": null,
+      "story_title": null,
+      "story_url": null,
+      "parent_id": null,
+      "created_at_i": 1775062800,
+      "objectID": "99001"
+    }
+  ],
+  "nbHits": 1,
+  "page": 0,
+  "nbPages": 1,
+  "hitsPerPage": 1
+}
