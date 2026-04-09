@@ -21,7 +21,7 @@ log = logging.getLogger(__name__)
 
 # Conditional imports — neither SDK may be installed
 try:
-    from claude_agent_sdk import query, ClaudeAgentOptions  # type: ignore[import-untyped]
+    from claude_code_sdk import query as cc_query, ClaudeCodeOptions  # type: ignore[import-untyped]
     HAS_AGENT_SDK = True
 except ImportError:
     HAS_AGENT_SDK = False
@@ -64,22 +64,47 @@ class LLMBackend(ABC):
 
 
 # ---------------------------------------------------------------------------
-# Agent SDK backend (default — uses Claude subscription)
+# Claude CLI backend (default — uses Claude subscription)
 # ---------------------------------------------------------------------------
 
-class AgentSDKBackend(LLMBackend):
-    """Batched 20/call, 2KB truncation, uses Claude subscription."""
+class ClaudeCLIBackend(LLMBackend):
+    """Calls `claude` CLI with --output-format json. Uses subscription auth.
+    Batches 20 jobs per call with 2KB description truncation."""
 
     BATCH_SIZE = 20
     DESC_LIMIT = 2000
 
-    def classify_jobs(self, jobs: list[dict], system_prompt: str) -> dict[str, dict]:
-        import asyncio
+    def _call_claude(self, prompt: str) -> str:
+        """Call claude CLI and return the model's text response."""
+        import subprocess
+        result = subprocess.run(
+            ["claude", "-p", prompt,
+             "--model", "claude-haiku-4-5-20251001",
+             "--output-format", "json",
+             "--max-turns", "1"],
+            capture_output=True, text=True, timeout=120,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"claude CLI failed: {result.stderr[:200]}")
 
+        # Parse the wrapper JSON to extract the model's response
+        wrapper = json.loads(result.stdout)
+        text = wrapper.get("result", "")
+
+        # Strip markdown code fences if present
+        if text.startswith("```"):
+            lines = text.split("\n")
+            # Remove first line (```json) and last line (```)
+            lines = [l for l in lines if not l.strip().startswith("```")]
+            text = "\n".join(lines)
+
+        return text.strip()
+
+    def classify_jobs(self, jobs: list[dict], system_prompt: str) -> dict[str, dict]:
         batches = [jobs[i:i + self.BATCH_SIZE] for i in range(0, len(jobs), self.BATCH_SIZE)]
         results: dict[str, dict] = {}
 
-        for batch in batches:
+        for i, batch in enumerate(batches):
             jobs_json = json.dumps([{
                 "id": j["id"],
                 "title": j.get("title", ""),
@@ -99,7 +124,7 @@ class AgentSDKBackend(LLMBackend):
             )
 
             try:
-                response_text = asyncio.run(self._query(prompt))
+                response_text = self._call_claude(prompt)
                 parsed = json.loads(response_text)
                 if isinstance(parsed, list):
                     for item in parsed:
@@ -107,18 +132,17 @@ class AgentSDKBackend(LLMBackend):
                             results[item["id"]] = _post_process_job(item)
                 elif isinstance(parsed, dict) and "id" in parsed:
                     results[parsed["id"]] = _post_process_job(parsed)
+                log.info("  batch %d/%d: %d classified", i + 1, len(batches), len(batch))
             except Exception:
-                log.exception("Agent SDK batch failed, skipping %d jobs", len(batch))
+                log.exception("CLI batch %d/%d failed, skipping %d jobs", i + 1, len(batches), len(batch))
 
         return results
 
     def classify_companies(self, companies: list[dict], system_prompt: str) -> dict[str, dict]:
-        import asyncio
-
         batches = [companies[i:i + self.BATCH_SIZE] for i in range(0, len(companies), self.BATCH_SIZE)]
         results: dict[str, dict] = {}
 
-        for batch in batches:
+        for i, batch in enumerate(batches):
             items_json = json.dumps([{
                 "name_normalized": c.get("name_normalized", ""),
                 "name": c.get("name", ""),
@@ -135,27 +159,17 @@ class AgentSDKBackend(LLMBackend):
             )
 
             try:
-                response_text = asyncio.run(self._query(prompt))
+                response_text = self._call_claude(prompt)
                 parsed = json.loads(response_text)
                 if isinstance(parsed, list):
                     for item in parsed:
                         if "name_normalized" in item:
                             results[item["name_normalized"]] = item
+                log.info("  batch %d/%d: %d classified", i + 1, len(batches), len(batch))
             except Exception:
-                log.exception("Agent SDK company batch failed, skipping %d companies", len(batch))
+                log.exception("CLI company batch %d/%d failed, skipping %d", i + 1, len(batches), len(batch))
 
         return results
-
-    async def _query(self, prompt: str) -> str:
-        result = await query(
-            prompt=prompt,
-            options=ClaudeAgentOptions(
-                model="haiku",
-                output_format="json",
-                max_tokens=4096,
-            ),
-        )
-        return result.text
 
 
 # ---------------------------------------------------------------------------
@@ -234,9 +248,17 @@ class BatchAPIBackend(LLMBackend):
 # ---------------------------------------------------------------------------
 
 def get_llm_backend() -> LLMBackend | None:
-    """Auto-select LLM backend. Returns None if neither SDK is available."""
+    """Auto-select LLM backend.
+
+    Priority:
+    1. Batch API (if ANTHROPIC_API_KEY set + anthropic installed) — fastest
+    2. Claude CLI (if `claude` in PATH) — uses subscription, no API key
+    3. None
+    """
     if os.environ.get("ANTHROPIC_API_KEY") and HAS_ANTHROPIC:
         return BatchAPIBackend()
-    if HAS_AGENT_SDK:
-        return AgentSDKBackend()
+    # Check if claude CLI is available
+    import shutil
+    if shutil.which("claude"):
+        return ClaudeCLIBackend()
     return None
