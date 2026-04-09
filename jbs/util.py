@@ -152,6 +152,13 @@ def extract_salary_from_text(text: str) -> tuple[float | None, float | None, str
     min_val = _parse(match.group(1), match.group(2))
     max_val = _parse(match.group(3), match.group(4))
 
+    # Heuristic: if one side is < 1000 and the other is >= 10000, the small
+    # number likely has the same magnitude (e.g. "$154-190,000" means $154k).
+    if min_val < 1000 and max_val >= 10000:
+        min_val *= 1000
+    elif max_val < 1000 and min_val >= 10000:
+        max_val *= 1000
+
     # Detect currency from the text preceding the match
     currency = 'USD'
     cur_match = _CURRENCY_RE.search(text[:match.start() + 1] if match.start() > 0 else text[:10])

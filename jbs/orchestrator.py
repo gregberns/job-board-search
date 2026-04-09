@@ -53,6 +53,12 @@ class ScraperOrchestrator:
             if result.failed_tokens:
                 self.store.mark_tokens_stale(name, result.failed_tokens)
 
+            # Mark tokens that returned jobs as valid
+            if scraper.meta.requires_tokens and ctx.tokens:
+                successful = [t for t in ctx.tokens if t not in set(result.failed_tokens)]
+                if successful:
+                    self.store.mark_tokens_valid(name, successful)
+
             self.store.mark_stale_jobs(run_id, name)
 
             self._log_source_summary(name, result, inserted)
