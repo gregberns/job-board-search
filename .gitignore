@@ -33,3 +33,9 @@ JobSpy/.venv/
 .dolt/
 *.db
 .beads-credential-key
+
+# NTM session data
+.ntm/
+
+# Agent mail config
+.mcp.json
