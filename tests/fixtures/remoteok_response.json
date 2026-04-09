@@ -1,0 +1,52 @@
+[
+  {"legal": "https://remoteok.com"},
+  {
+    "id": "101",
+    "position": "Senior Python Engineer",
+    "company": "Acme Corp",
+    "company_logo": "https://remoteok.com/assets/logo-acme.png",
+    "date": "2026-04-07T12:00:00+00:00",
+    "location": "San Francisco, CA",
+    "salary_min": "150000",
+    "salary_max": "200000",
+    "tags": ["python", "backend", "full-time"],
+    "description": "<p>Build awesome Python services.</p>",
+    "apply_url": "https://acme.com/apply/101",
+    "url": "https://remoteok.com/remote-jobs/101"
+  },
+  {
+    "id": "102",
+    "position": "Frontend Developer",
+    "company": "Beta Inc",
+    "date": "2026-04-06T09:30:00Z",
+    "location": "",
+    "salary_min": "0",
+    "salary_max": "0",
+    "tags": ["react", "typescript"],
+    "description": "<p>React + TypeScript role. Salary range $120k-$160k/year.</p>",
+    "url": "https://remoteok.com/remote-jobs/102"
+  },
+  {
+    "id": "103",
+    "position": "DevOps Engineer",
+    "company": "Gamma LLC",
+    "date": "2026-04-05T15:00:00+00:00",
+    "location": "London, UK",
+    "salary_min": "130000",
+    "salary_max": "170000",
+    "tags": ["devops", "aws", "contract"],
+    "description": "<p>Manage cloud infrastructure on AWS.</p>"
+  },
+  {
+    "id": "104",
+    "position": "Data Scientist",
+    "company": "Delta AI",
+    "date": "2026-04-08T08:00:00+00:00",
+    "location": "Remote",
+    "salary_min": "",
+    "salary_max": "",
+    "tags": ["ml", "python"],
+    "description": "<p>ML and data science role.</p>",
+    "apply_url": "https://delta.ai/jobs/104"
+  }
+]
