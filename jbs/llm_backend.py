@@ -71,8 +71,8 @@ class ClaudeCLIBackend(LLMBackend):
     """Calls `claude` CLI with --output-format json. Uses subscription auth.
     Batches 20 jobs per call with 2KB description truncation."""
 
-    BATCH_SIZE = 20
-    DESC_LIMIT = 2000
+    BATCH_SIZE = 10
+    DESC_LIMIT = 1500
 
     def _call_claude(self, prompt: str) -> str:
         """Call claude CLI and return the model's text response."""
@@ -82,7 +82,7 @@ class ClaudeCLIBackend(LLMBackend):
              "--model", "claude-haiku-4-5-20251001",
              "--output-format", "json",
              "--max-turns", "1"],
-            capture_output=True, text=True, timeout=120,
+            capture_output=True, text=True, timeout=300,
         )
         if result.returncode != 0:
             raise RuntimeError(f"claude CLI failed: {result.stderr[:200]}")

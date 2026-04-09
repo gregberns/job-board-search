@@ -245,7 +245,8 @@ class EnrichmentPipeline:
         log.info("Stage 2: classifying %d jobs...", len(jobs))
         results = backend.classify_jobs(jobs, JOB_SYSTEM_PROMPT)
 
-        # Apply results
+        # Apply results (commit incrementally for crash resilience)
+        written = 0
         for job_id, data in results.items():
             updates = {}
             if "engineering_role" in data:
@@ -267,6 +268,10 @@ class EnrichmentPipeline:
                     f"UPDATE jobs SET {set_clause} WHERE id = ?",
                     list(updates.values()) + [job_id],
                 )
+                written += 1
+                # Commit every 20 jobs so partial results survive crashes
+                if written % 20 == 0:
+                    conn.commit()
 
         conn.commit()
 
