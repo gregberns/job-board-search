@@ -11,6 +11,12 @@ dependencies = [
 
 [project.optional-dependencies]
 enrich = ["anthropic>=0.40"]
+vector = [
+    "sqlite-vec>=0.1.6",
+    "fastembed>=0.8",
+    "mlx-embedding-models>=0.0.11",
+    "einops",
+]
 
 [tool.setuptools.packages.find]
 include = ["jbs*"]
