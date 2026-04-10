@@ -2,6 +2,10 @@
 
 Models must be downloaded before use: `jbs models download`.
 Loading will fail if models are not cached locally.
+
+Embedding backends:
+  - Summary + Description: mlx-embedding-models (Apple MLX, on-device)
+  - Reranker: fastembed (ONNX cross-encoder)
 """
 
 import json
@@ -20,22 +24,24 @@ log = logging.getLogger(__name__)
 
 SUMMARY_MODEL = "BAAI/bge-small-en-v1.5"
 SUMMARY_DIM = 384
+SUMMARY_MLX_REGISTRY = "bge-small"
 
-DESC_MODEL = "jinaai/jina-embeddings-v2-small-en"
-DESC_DIM = 512
+DESC_MODEL = "nomic-ai/nomic-embed-text-v1.5"
+DESC_DIM = 768
+DESC_MLX_REGISTRY = "nomic-text-v1.5"
 
 RERANK_MODEL = "Xenova/ms-marco-MiniLM-L-6-v2"
 
-# Truncation limit for description texts. The jina model has an 8192-token
+# Truncation limit for description texts. The nomic model has a 2048-token
 # context window (~4 chars/token). 30k chars covers 99%+ of job descriptions
 # without truncation while preventing OOM on outliers (some Greenhouse pages
 # are 1M+ chars due to page-dump artifacts).
 MAX_DESC_CHARS = 30_000
 
 ALL_MODELS = {
-    "summary": {"name": SUMMARY_MODEL, "type": "embedding"},
-    "description": {"name": DESC_MODEL, "type": "embedding"},
-    "reranker": {"name": RERANK_MODEL, "type": "cross_encoder"},
+    "summary": {"name": SUMMARY_MODEL, "type": "embedding", "backend": "mlx"},
+    "description": {"name": DESC_MODEL, "type": "embedding", "backend": "mlx"},
+    "reranker": {"name": RERANK_MODEL, "type": "cross_encoder", "backend": "fastembed"},
 }
 
 
@@ -43,22 +49,46 @@ ALL_MODELS = {
 # Cache helpers
 # ---------------------------------------------------------------------------
 
-def _get_cache_dir() -> Path:
-    from fastembed.common.utils import define_cache_dir
+def _is_mlx_model_cached(hf_name: str) -> bool:
+    """Check if an MLX/HF Hub model is cached locally.
 
-    return Path(str(define_cache_dir()))
-
-
-def is_model_cached(model_name: str) -> bool:
-    """Check if a model's ONNX file exists in the cache.
-
-    fastembed may store models under different names than the input
-    (e.g., 'BAAI/bge-small-en-v1.5' → 'models--qdrant--bge-small-en-v1.5-onnx-q').
-    We resolve the actual source repo from fastembed's model registry.
+    MLX models are stored via huggingface_hub in the standard HF cache layout:
+    ~/.cache/huggingface/hub/models--{org}--{name}/snapshots/{hash}/
     """
-    cache_dir = _get_cache_dir()
+    cache_dir = Path.home() / ".cache" / "huggingface" / "hub"
+    dir_name = "models--" + hf_name.replace("/", "--")
+    model_dir = cache_dir / dir_name / "snapshots"
+    if not model_dir.exists():
+        return False
+    # Check that at least one snapshot directory exists with files
+    for snapshot in model_dir.iterdir():
+        if snapshot.is_dir() and any(snapshot.iterdir()):
+            return True
+    return False
 
-    # Get the HF source repo fastembed actually downloads from
+
+def _resolve_hf_source(model_name: str) -> str | None:
+    """Look up the actual HF repo fastembed downloads from (reranker only)."""
+    try:
+        from fastembed.rerank.cross_encoder import TextCrossEncoder
+
+        for m in TextCrossEncoder.list_supported_models():
+            if m.get("model", "").lower() == model_name.lower():
+                hf = m.get("sources", {}).get("hf")
+                return hf
+    except Exception:
+        pass
+    return None
+
+
+def _is_fastembed_model_cached(model_name: str) -> bool:
+    """Check if a fastembed model's ONNX file exists in the cache."""
+    try:
+        from fastembed.common.utils import define_cache_dir
+        cache_dir = Path(str(define_cache_dir()))
+    except Exception:
+        return False
+
     hf_source = _resolve_hf_source(model_name)
     candidates = [
         "models--" + model_name.replace("/", "--"),
@@ -76,27 +106,19 @@ def is_model_cached(model_name: str) -> bool:
     return False
 
 
-def _resolve_hf_source(model_name: str) -> str | None:
-    """Look up the actual HF repo fastembed downloads from."""
-    try:
-        from fastembed import TextEmbedding
+def is_model_cached(model_name: str) -> bool:
+    """Check if a model is cached locally.
 
-        for m in TextEmbedding.list_supported_models():
-            if m.get("model", "").lower() == model_name.lower():
-                hf = m.get("sources", {}).get("hf")
-                return hf
-    except Exception:
-        pass
-    try:
-        from fastembed.rerank.cross_encoder import TextCrossEncoder
-
-        for m in TextCrossEncoder.list_supported_models():
-            if m.get("model", "").lower() == model_name.lower():
-                hf = m.get("sources", {}).get("hf")
-                return hf
-    except Exception:
-        pass
-    return None
+    Routes to MLX cache detection for embedding models,
+    fastembed cache detection for the reranker.
+    """
+    if model_name in (SUMMARY_MODEL, DESC_MODEL):
+        return _is_mlx_model_cached(model_name)
+    elif model_name == RERANK_MODEL:
+        return _is_fastembed_model_cached(model_name)
+    else:
+        # Unknown model — try both
+        return _is_mlx_model_cached(model_name) or _is_fastembed_model_cached(model_name)
 
 
 def get_model_status() -> list[dict]:
@@ -109,18 +131,22 @@ def get_model_status() -> list[dict]:
 
 
 def download_models() -> dict[str, bool]:
-    """Download all models. Returns {model_name: success}."""
-    from fastembed import TextEmbedding
-    from fastembed.rerank.cross_encoder import TextCrossEncoder
+    """Download all models. Returns {model_name: success}.
 
+    MLX embedding models are downloaded via huggingface_hub.snapshot_download().
+    The reranker is downloaded via fastembed TextCrossEncoder instantiation.
+    """
     results = {}
     for role, info in ALL_MODELS.items():
         name = info["name"]
-        log.info("Downloading %s model: %s", role, name)
+        backend = info["backend"]
+        log.info("Downloading %s model: %s (backend: %s)", role, name, backend)
         try:
-            if info["type"] == "embedding":
-                TextEmbedding(model_name=name)
+            if backend == "mlx":
+                from huggingface_hub import snapshot_download
+                snapshot_download(repo_id=name)
             else:
+                from fastembed.rerank.cross_encoder import TextCrossEncoder
                 TextCrossEncoder(model_name=name)
             results[name] = True
             log.info("  %s: OK", name)
@@ -141,6 +167,9 @@ class ModelNotCachedError(RuntimeError):
 
 class Embedder:
     """Lazy-loaded embedding models for job vector search.
+
+    Embedding models use mlx-embedding-models (Apple MLX, on-device).
+    Reranker uses fastembed (ONNX cross-encoder).
 
     Models must be pre-downloaded via `jbs models download`.
     Raises ModelNotCachedError if a model is missing.
@@ -164,21 +193,26 @@ class Embedder:
     @property
     def summary_model(self):
         if self._summary_model is None:
-            from fastembed import TextEmbedding
+            from mlx_embedding_models.embedding import EmbeddingModel
 
             self._require_cached(SUMMARY_MODEL)
             log.info("Loading summary model: %s", SUMMARY_MODEL)
-            self._summary_model = TextEmbedding(model_name=SUMMARY_MODEL)
+            self._summary_model = EmbeddingModel.from_registry(SUMMARY_MLX_REGISTRY)
         return self._summary_model
 
     @property
     def desc_model(self):
         if self._desc_model is None:
-            from fastembed import TextEmbedding
+            import mlx_embedding_models.embedding as mlx_emb
+            from mlx_embedding_models.embedding import EmbeddingModel
+
+            # Monkey-patch SEQ_LENS for 2048-token support (nomic-v1.5 needs it)
+            if 2048 not in mlx_emb.SEQ_LENS:
+                mlx_emb.SEQ_LENS.extend([640, 768, 896, 1024, 1280, 1536, 2048])
 
             self._require_cached(DESC_MODEL)
             log.info("Loading description model: %s", DESC_MODEL)
-            self._desc_model = TextEmbedding(model_name=DESC_MODEL)
+            self._desc_model = EmbeddingModel.from_registry(DESC_MLX_REGISTRY)
         return self._desc_model
 
     @property
@@ -249,20 +283,41 @@ class Embedder:
     # -- embedding methods --------------------------------------------------
 
     def embed_summaries(self, texts: list[str]) -> list[np.ndarray]:
-        """Embed a batch of composite summary texts."""
-        return list(self.summary_model.passage_embed(texts))
+        """Embed a batch of composite summary texts.
+
+        BGE-small does not require a prefix for passage/document embedding.
+        Returns list of ndarray(384,).
+        """
+        result = self.summary_model.encode(texts)
+        return [row for row in result]
 
     def embed_descriptions(self, texts: list[str]) -> list[np.ndarray]:
-        """Embed a batch of full description texts."""
-        return list(self.desc_model.passage_embed(texts))
+        """Embed a batch of full description texts.
+
+        Nomic requires "search_document: " prefix for document embedding.
+        Returns list of ndarray(768,).
+        """
+        prefixed = ["search_document: " + t for t in texts]
+        result = self.desc_model.encode(prefixed)
+        return [row for row in result]
 
     def query_summary(self, text: str) -> np.ndarray:
-        """Embed a single query for summary search."""
-        return list(self.summary_model.query_embed([text]))[0]
+        """Embed a single query for summary search.
+
+        BGE-small uses "query: " prefix for query embedding.
+        Returns ndarray(384,).
+        """
+        result = self.summary_model.encode(["query: " + text])
+        return result[0]
 
     def query_description(self, text: str) -> np.ndarray:
-        """Embed a single query for description search."""
-        return list(self.desc_model.query_embed([text]))[0]
+        """Embed a single query for description search.
+
+        Nomic uses "search_query: " prefix for query embedding.
+        Returns ndarray(768,).
+        """
+        result = self.desc_model.encode(["search_query: " + text])
+        return result[0]
 
     def rerank(
         self, query: str, documents: list[str], top_n: int = 50
