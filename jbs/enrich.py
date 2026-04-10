@@ -392,7 +392,7 @@ class EnrichmentPipeline:
         if not self.store.has_vec():
             log.warning(
                 "Stage 4: sqlite-vec not available. "
-                "Install: pip install sqlite-vec fastembed"
+                "Install: pip install -e '.[vector]'"
             )
             return 0
 
@@ -400,8 +400,8 @@ class EnrichmentPipeline:
             from jbs.embeddings import get_embedder
         except ImportError:
             log.warning(
-                "Stage 4: fastembed not available. "
-                "Install: pip install fastembed"
+                "Stage 4: mlx-embedding-models not available. "
+                "Install: pip install -e '.[vector]'"
             )
             return 0
 
@@ -467,7 +467,7 @@ class EnrichmentPipeline:
         # Record enrichment run
         conn.execute(
             """INSERT INTO enrichment_runs (run_id, started_at, stage, items, model)
-               VALUES (?, ?, 'embeddings', ?, 'local-onnx')""",
+               VALUES (?, ?, 'embeddings', ?, 'local-mlx')""",
             (run_id, _now_iso(), total_embedded),
         )
         conn.commit()

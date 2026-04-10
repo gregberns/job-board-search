@@ -305,7 +305,7 @@ def search(ctx, query, new_only, company, location, remote_flag, onsite, source,
     store = _require_db(ctx)
 
     if vec and not store.has_vec():
-        click.echo("Warning: --vec requires sqlite-vec and fastembed. Install: pip install sqlite-vec fastembed", err=True)
+        click.echo("Warning: --vec requires sqlite-vec and mlx-embedding-models. Install: pip install -e '.[vector]'", err=True)
 
     work_arr = None
     if remote_flag:

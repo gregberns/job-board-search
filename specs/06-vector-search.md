@@ -10,15 +10,15 @@ Add local embedding-based vector search that combines with the existing FTS5 key
 
 ## Embedding Models
 
-Three ONNX models via `fastembed`, lazy-loaded on first use, cached in `~/.cache/fastembed/`:
+Two MLX models via `mlx-embedding-models` (Metal GPU), one ONNX model via `fastembed` (re-ranking). Lazy-loaded, embedding models cached in `~/.cache/huggingface/hub/`, reranker in fastembed cache:
 
-| Role | Model | Dims | Max Tokens | Size | Purpose |
+| Role | Model | Dims | Max Tokens | Size | Backend |
 |------|-------|------|------------|------|---------|
-| Summary | `BAAI/bge-small-en-v1.5` | 384 | 512 | 67 MB | Composite metadata embedding |
-| Description | `nomic-ai/nomic-embed-text-v1.5-Q` | 768 | 8192 | 130 MB | Full job description embedding |
-| Re-ranker | `Xenova/ms-marco-MiniLM-L-6-v2` | n/a | n/a | 80 MB | Cross-encoder re-ranking |
+| Summary | `BAAI/bge-small-en-v1.5` | 384 | 512 | 67 MB | MLX (Metal GPU) |
+| Description | `nomic-ai/nomic-embed-text-v1.5` | 768 | 2048 | ~300 MB | MLX (Metal GPU) |
+| Re-ranker | `Xenova/ms-marco-MiniLM-L-6-v2` | n/a | n/a | 80 MB | ONNX (fastembed) |
 
-Total: ~277 MB downloaded on first use.
+Total: ~447 MB downloaded on first use.
 
 ## Text Preparation
 
@@ -170,7 +170,7 @@ Private helpers:
 | Condition | Behavior |
 |-----------|----------|
 | `sqlite-vec` not installed | `has_vec()` returns False. `search()` ignores `vec_query` with a warning. `enrich --stage embeddings` fails with install instructions. |
-| `fastembed` not installed | `enrich --stage embeddings` fails with install instructions. Search with `--vec` fails with install instructions. |
+| `mlx-embedding-models` not installed | `enrich --stage embeddings` fails with install instructions. Search with `--vec` fails with install instructions. |
 | Vec tables exist but are empty | `--vec` search returns empty results with message: "No embeddings found. Run: jbs enrich --stage embeddings" |
 | Some jobs lack embeddings | KNN returns whatever matches. New jobs need `jbs enrich --stage embeddings` to be searchable via vector. |
 | `vec_query` absent | Existing search behavior, unchanged. |
@@ -179,7 +179,12 @@ Private helpers:
 
 ```toml
 [project.optional-dependencies]
-vector = ["sqlite-vec>=0.1.6", "fastembed>=0.8"]
+vector = [
+    "sqlite-vec>=0.1.6",
+    "fastembed>=0.8",
+    "mlx-embedding-models>=0.0.11",
+    "einops",
+]
 ```
 
-`numpy` is a transitive dependency of fastembed.
+`numpy` is a transitive dependency of mlx-embedding-models.
