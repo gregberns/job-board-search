@@ -56,6 +56,21 @@ CREATE VIRTUAL TABLE IF NOT EXISTS vec_descriptions
     USING vec0(embedding float[768] distance_metric=cosine);
 ```
 
+**Dimension tracking:** A regular `vec_meta` table records which vec tables exist and their dimensions:
+
+```sql
+CREATE TABLE IF NOT EXISTS vec_meta (table_name TEXT PRIMARY KEY, dim INTEGER NOT NULL);
+```
+
+The module-level `_ensure_vec_table(conn, table_name, dim)` helper manages vec table lifecycle:
+1. Checks `vec_meta` for the table's recorded dimension
+2. If dimension matches, no-op
+3. If dimension mismatch (e.g., model swap), drops and recreates the vec table
+4. If table exists but no meta entry (pre-meta database), drops and recreates
+5. Creates the virtual table and records the dimension in `vec_meta`
+
+This handles the migration path when embedding models change (e.g., fastembed -> MLX swap), ensuring stale embeddings with wrong dimensions are cleared automatically.
+
 **Rowid mapping:** Vec table rowids match the implicit SQLite `rowid` of the `jobs` table. This allows zero-cost joins: `JOIN jobs j ON j.rowid = v.rowid`. No separate mapping table is needed.
 
 **Insert:**
@@ -140,7 +155,7 @@ class Embedder:
     def query_description(self, text: str) -> np.ndarray: ...
 
     # Re-ranking
-    def rerank(self, query: str, documents: list[str], top_n: int) -> list[tuple[int, float]]: ...
+    def rerank(self, query: str, documents: list[str], top_n: int = 50) -> list[tuple[int, float]]: ...
 
 def get_embedder() -> Embedder: ...  # Module-level singleton
 
@@ -162,8 +177,8 @@ Added to `Store`:
 Private helpers:
 | Method | Purpose |
 |--------|---------|
-| `_vec_knn(table, query_vec, k)` | KNN on a single vec table |
-| `_fts_rank(text, limit)` | FTS5 ranking without structured filters |
+| `_vec_knn(table, query_vec, k=200)` | KNN on a single vec table, returns `[(job_id, distance)]` |
+| `_fts_rank(text, limit=200)` | FTS5 ranking without structured filters, returns `[(job_id, score)]` |
 
 ## Graceful Degradation
 

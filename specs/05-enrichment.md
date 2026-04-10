@@ -12,26 +12,27 @@ Jobs arrive from scrapers with raw data: title, description, company name, locat
 
 Two backends for LLM classification, selected automatically:
 
-1. **Primary: Claude Agent SDK** (`pip install claude-agent-sdk`). Uses the user's existing Claude subscription (Pro/Max) via Claude Code auth. No API key needed. Jobs are batched ~20 per call with descriptions truncated to ~2KB to keep runtime reasonable (~7 min for 3000 jobs). This is the default path.
+1. **Primary: Claude CLI** (`claude` subprocess). Uses the user's existing Claude subscription (Pro/Max) via the `claude` CLI tool. No API key needed. Jobs are batched 10 per call with descriptions truncated to 1500 chars to keep runtime reasonable. This is the default path.
 
 2. **Optional fast path: Anthropic Batch API** (`pip install anthropic`). If `ANTHROPIC_API_KEY` is set, uses the Message Batches API instead. Each job gets its own call with the full description -- no truncation. Submit all at once, results in ~5 minutes. 50% cheaper per-token than standard API, with prompt caching.
 
 **Selection logic:**
 ```python
 def get_llm_backend():
-    if os.environ.get("ANTHROPIC_API_KEY"):
+    if os.environ.get("ANTHROPIC_API_KEY") and HAS_ANTHROPIC:
         return BatchAPIBackend()   # fast path: individual calls, full descriptions
-    else:
-        return AgentSDKBackend()   # default: batched calls via subscription
+    if shutil.which("claude"):
+        return ClaudeCLIBackend()  # default: batched calls via subscription
+    return None
 ```
 
-**Why Agent SDK as default?** Most users already have a Claude subscription. Requiring a separate API key and billing account is friction. The Agent SDK wraps Claude Code's auth, so it "just works" for anyone who has Claude Code installed.
+**Why Claude CLI as default?** Most users already have a Claude subscription and the `claude` CLI installed. Requiring a separate API key and billing account is friction. The CLI uses subscription auth, so it "just works" for anyone who has Claude Code installed.
 
-**Why offer the Batch API?** It's faster (~5 min vs ~7 min), more accurate (full descriptions, no truncation), and cheaper per-token. Power users who do frequent enrichment runs will appreciate it.
+**Why offer the Batch API?** It's faster, more accurate (full descriptions, no truncation), and cheaper per-token. Power users who do frequent enrichment runs will appreciate it.
 
 **Dependencies:**
-- Default: `claude-agent-sdk` (bundled with Claude Code)
-- Optional: `anthropic>=0.40` (only if user wants Batch API fast path)
+- Default: `claude` CLI in PATH (bundled with Claude Code, no pip dependency)
+- Optional: `anthropic>=0.40` (only if user wants Batch API fast path): `pip install -e '.[enrich]'`
 - Everything except LLM stages works without either
 
 ## Pipeline Architecture
@@ -314,6 +315,30 @@ def extract_years_experience(description: str) -> int | None:
     return None
 ```
 
+### LLM Pre-Filter (`classify_llm_filter`)
+
+Stage 1 classifies each job as `send` or `skip_*` to control which jobs reach the LLM in Stage 2. This saves LLM cost by filtering out jobs that are clearly not relevant before sending them for classification.
+
+```python
+_SALARY_FLOOR = 190_000
+
+def classify_llm_filter(title, is_management, seniority, salary_usd_max, max_amount) -> str:
+    """Returns: 'send', 'skip_mgmt', 'skip_title', 'skip_salary', 'skip_seniority'.
+    Applied in priority order (first match wins). Always recomputed."""
+    if is_management:
+        return 'skip_mgmt'
+    if not _TITLE_KEEP.search(title) and _TITLE_EXCLUDE.search(title):
+        return 'skip_title'
+    effective_max = salary_usd_max or max_amount
+    if effective_max is not None and effective_max < _SALARY_FLOOR:
+        return 'skip_salary'
+    if seniority in ('intern', 'junior'):
+        return 'skip_seniority'
+    return 'send'
+```
+
+The `llm_filter` column is stored on each job row. Stage 2's WHERE clause respects it: `(llm_filter = 'send' OR llm_filter IS NULL)`.
+
 ### What Stage 1 Does NOT Do
 
 - **`tech_stack`** -- delegated to LLM. While regex can match obvious keywords, it misses semantic references ("Google's cloud platform" = GCP, "Meta's ML framework" = PyTorch). Since we're sending full descriptions to the LLM anyway, let it handle this for better accuracy.
@@ -340,6 +365,7 @@ FROM jobs
 WHERE engineering_role IS NULL
   AND description IS NOT NULL
   AND length(description) > 50
+  AND (llm_filter = 'send' OR llm_filter IS NULL)
 ORDER BY date_posted DESC
 ```
 
@@ -431,18 +457,17 @@ class LLMBackend(ABC):
         """Classify companies. Returns {name_normalized: classification_dict}."""
 ```
 
-#### Agent SDK Backend (default)
+#### Claude CLI Backend (default)
 
-Uses `claude-agent-sdk` to invoke Claude via the user's subscription. Jobs are batched ~20 per call with descriptions truncated to ~2KB for reasonable throughput.
+Calls the `claude` CLI via `subprocess.run()` with `--output-format json`. Uses subscription auth, no API key needed. Jobs are batched 10 per call with descriptions truncated to 1500 chars.
 
 ```python
-import asyncio
-from claude_agent_sdk import query, ClaudeAgentOptions
+class ClaudeCLIBackend(LLMBackend):
+    BATCH_SIZE = 10
+    DESC_LIMIT = 1500
 
-class AgentSDKBackend(LLMBackend):
     def classify_jobs(self, jobs, system_prompt):
-        # Batch jobs into groups of 20
-        batches = [jobs[i:i+20] for i in range(0, len(jobs), 20)]
+        batches = [jobs[i:i+self.BATCH_SIZE] for i in range(0, len(jobs), self.BATCH_SIZE)]
         results = {}
 
         for batch in batches:
@@ -450,32 +475,33 @@ class AgentSDKBackend(LLMBackend):
                 "id": j["id"],
                 "title": j["title"],
                 "company": j["company_raw"],
-                "description": j["description"][:2000],  # truncate for batching
+                "description": strip_boilerplate(j["description"])[:self.DESC_LIMIT],
                 "location": j["location_raw"],
+                "seniority": j.get("seniority") or "unknown",
             } for j in batch], indent=2)
 
-            prompt = f"{system_prompt}\n\nJobs:\n{jobs_json}"
-            response = asyncio.run(self._query(prompt))
-            parsed = json.loads(response)
+            prompt = f"{system_prompt}\n\nClassify each job...\n\nJobs:\n{jobs_json}"
+            response_text = self._call_claude(prompt)
+            parsed = json.loads(response_text)
 
             for item in parsed:
                 results[item["id"]] = item
 
         return results
 
-    async def _query(self, prompt: str) -> str:
-        result = await query(
-            prompt=prompt,
-            options=ClaudeAgentOptions(
-                model="haiku",
-                output_format="json",
-                max_tokens=4096,
-            ),
+    def _call_claude(self, prompt: str) -> str:
+        result = subprocess.run(
+            ["claude", "-p", prompt,
+             "--model", "claude-haiku-4-5-20251001",
+             "--output-format", "json",
+             "--max-turns", "1"],
+            capture_output=True, text=True, timeout=300,
         )
-        return result.text
+        wrapper = json.loads(result.stdout)
+        return wrapper.get("result", "")
 ```
 
-**Batching rationale:** 20 jobs × 2KB descriptions = ~40KB per call. With system prompt and output, well within context limits. ~150 calls for 3000 jobs at ~2.7s each = ~7 minutes.
+**Batching rationale:** 10 jobs x 1500 char descriptions = ~15KB per call. Smaller batches improve reliability — a single timeout loses fewer jobs. ~300 calls for 3000 jobs.
 
 #### Batch API Backend (fast path, requires API key)
 
@@ -523,12 +549,12 @@ class BatchAPIBackend(LLMBackend):
 
 **Key differences:**
 
-| | Agent SDK (default) | Batch API (fast path) |
+| | Claude CLI (default) | Batch API (fast path) |
 |---|---|---|
 | Auth | Claude subscription | API key |
-| Description length | ~2KB (truncated) | Full (no truncation) |
-| Jobs per call | 20 (batched prompt) | 1 (individual) |
-| Total time (3000 jobs) | ~7 min | ~5 min |
+| Description length | 1500 chars (truncated) | Full (no truncation) |
+| Jobs per call | 10 (batched prompt) | 1 (individual) |
+| Total time (3000 jobs) | ~10 min | ~5 min |
 | Cost | Included in subscription | ~$1.20 (Haiku Batch) |
 | Accuracy | Good (~85%) | Best (~95%, full context) |
 
@@ -762,6 +788,6 @@ The Batch API gives a 50% discount over standard API pricing. Prompt caching (1-
 | `jbs/enrich_rules.py` | Create | Stage 1: salary extraction, seniority keywords, visa patterns, years_experience regex |
 | `jbs/store.py` | Modify | Add enrichment-related queries (`get_unenriched_jobs`, `update_enrichment`, new columns in `_ensure_schema`) |
 | `jbs/util.py` | Modify | Add `strip_boilerplate`, `fix_mojibake` functions |
-| `jbs/llm_backend.py` | Create | `LLMBackend` ABC, `AgentSDKBackend`, `BatchAPIBackend`, `get_llm_backend()` selector |
+| `jbs/llm_backend.py` | Create | `LLMBackend` ABC, `ClaudeCLIBackend`, `BatchAPIBackend`, `get_llm_backend()` selector |
 | `jbs/embeddings.py` | Create | Embedding models, text preparation, batch embedding (see spec 06) |
-| `pyproject.toml` | Modify | Add `claude-agent-sdk` to dependencies; add `anthropic>=0.40` to optional: `[project.optional-dependencies] fast-enrich = ["anthropic>=0.40"]`; add vector optional deps |
+| `pyproject.toml` | Modify | Add `anthropic>=0.40` to optional: `[project.optional-dependencies] enrich = ["anthropic>=0.40"]`; add vector optional deps |

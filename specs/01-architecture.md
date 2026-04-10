@@ -25,7 +25,11 @@ job-board-search/
 │   ├── models.py           # Job, ScrapeResult, enums
 │   ├── orchestrator.py     # Runs scrapers, writes to store
 │   ├── enrich.py           # LLM enrichment pipeline
+│   ├── enrich_rules.py     # Stage 1: seniority, salary, visa, llm_filter
+│   ├── enrich_prompts.py   # LLM prompt templates
+│   ├── llm_backend.py      # Claude CLI + Batch API backends
 │   ├── embeddings.py       # Local embedding models, text prep, RRF, re-ranking
+│   ├── discover.py         # HN token discovery
 │   ├── util.py             # Inlined helpers (see section 12)
 │   └── scrapers/
 │       ├── __init__.py     # Registry (@register decorator, explicit imports)
@@ -342,11 +346,12 @@ jbs [--db PATH] [--format table|json|csv] [--no-color] [--verbose]
  |     --sources, --search-term, --hours-old, --classify, --dry-run
  +-- search                         # Query the job database
  |     QUERY, --new, --company, --remote, --source, --salary-min, --days,
- |     --ai-native, --seniority, --domain, --tag, --interest, --sort, --limit
+ |     --ai-native, --seniority, --domain, --tag, --interest, --engineering,
+ |     --vec, --sort, --limit
  +-- show <job-id>                  # Full details for one job
  |     --no-desc, --open
  +-- enrich                         # Run classification pipeline
- |     --stage (rules|jobs|companies), --dry-run, --source, --force
+ |     --stage (rules|jobs|companies|embeddings), --dry-run, --source, --force
  +-- annotate <job-id>              # Tag, rate, note a job
  |     --tag, --untag, --note, --rating, --pros, --cons
  +-- apply <job-id>                 # Track application status
@@ -354,11 +359,16 @@ jbs [--db PATH] [--format table|json|csv] [--no-color] [--verbose]
  +-- stats                          # DB statistics, scrape history
  |     --runs
  +-- tokens                         # Token management subcommands
-       +-- validate                 # Ping live APIs, update token_status
-       |     --platform, --status (unchecked|all)
-       +-- add <platform> <token>   # Add a single token manually
-       |     --name
-       +-- list                     # Show token counts by platform and status
+ |     +-- validate                 # Ping live APIs, update token_status
+ |     |     --platform, --status (unchecked|all)
+ |     +-- add <platform> <token>   # Add a single token manually
+ |     |     --name
+ |     +-- list                     # Show token counts by platform and status
+ |     +-- discover                 # Discover ATS tokens from HN comments
+ |           --phase (harvest|find-careers|detect-ats), --status
+ +-- models                         # Embedding model management
+       +-- list                     # Show status of embedding models
+       +-- download                 # Download all embedding models
 ```
 
 ```python
@@ -491,9 +501,11 @@ jbs scrape
 
 jbs enrich (separate step or via --classify)
   |
-  +-- Stage 1: rules (free) -- seniority (partial), salary normalization, visa_sponsorship, years_experience, is_management
-  +-- Stage 2: jobs (Haiku) -- engineering_role, seniority, domain
+  +-- Stage 0: cleanup (free) -- HTML->markdown, data URI stripping, encoding fixes
+  +-- Stage 1: rules (free) -- seniority, salary, visa, years_exp, is_management, llm_filter
+  +-- Stage 2: jobs (Haiku) -- engineering_role, seniority, domain, tech_stack, summary
   +-- Stage 3: companies (Haiku) -- description, industry, ai_native, funding_stage
+  +-- Stage 4: embeddings (free, local) -- summary vectors (384d), description vectors (768d)
 
 jbs search / show / annotate / apply
   |
@@ -715,6 +727,9 @@ with ThreadPoolExecutor(max_workers=self.max_workers) as pool:
 | `extract_salary_from_text(text)` | Regex salary extraction from description text | JobSpy |
 | `normalize_company_name(name)` | Company name normalization for dedup (spec 02) | New |
 | `parse_location(raw)` | Parse location string into city/state/country | JobSpy |
+| `strip_data_uris(text)` | Remove base64 data: URIs from descriptions | New |
+| `strip_boilerplate(text)` | Remove EEO/legal boilerplate (in memory, not persisted) | New |
+| `fix_mojibake(text)` | Fix UTF-8 mojibake (RemoteOK encoding issues) | New |
 
 ## 13. Testing
 

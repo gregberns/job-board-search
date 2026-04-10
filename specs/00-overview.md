@@ -20,7 +20,7 @@ Everything except LLM enrichment (`jbs enrich` stages 2-3) works without any API
 git clone <repo>
 cd job-board-search
 python -m venv .venv && source .venv/bin/activate
-pip install -e .   # installs jbs CLI + dependencies (click, rich, requests, claude-agent-sdk)
+pip install -e .   # installs jbs CLI + dependencies (click, rich, requests, markdownify)
 ```
 
 After install, the `jbs` command is available in your shell. All state lives in the project directory -- there is nothing global to configure.
