@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import html as html_mod
 import re
 from datetime import date, timedelta
 
@@ -34,11 +35,41 @@ def create_session() -> Session:
 # HTML / text cleanup
 # ---------------------------------------------------------------------------
 
-def html_to_markdown(html: str) -> str:
-    """Convert HTML to clean markdown using markdownify."""
-    if not html:
+# Matches <img> tags with data: URIs (inline base64 images)
+_DATA_IMG_RE = re.compile(
+    r'<img[^>]*\ssrc=["\']data:[^"\']*["\'][^>]*/?>',
+    re.IGNORECASE,
+)
+
+# Matches markdown images with data: URIs: ![alt](data:image/...;base64,...)
+_MD_DATA_IMG_RE = re.compile(
+    r'!\[[^\]]*\]\(data:[^)]+\)',
+)
+
+
+def strip_data_uris(text: str) -> str:
+    """Strip inline base64 data: URIs from both HTML and markdown text."""
+    text = _DATA_IMG_RE.sub('', text)
+    text = _MD_DATA_IMG_RE.sub('', text)
+    return text
+
+
+def html_to_markdown(raw_html: str) -> str:
+    """Convert HTML to clean markdown using markdownify.
+
+    Handles entity-encoded HTML (``&lt;div&gt;``) and strips inline
+    base64 ``data:`` images which have no semantic value for search.
+    """
+    if not raw_html:
         return ""
-    return md(html).strip()
+    # Decode HTML entities (handles &lt; &gt; &amp; &quot; etc.)
+    decoded = html_mod.unescape(raw_html)
+    # Strip <img src="data:..."> tags (base64 images inflate descriptions to MBs)
+    decoded = _DATA_IMG_RE.sub('', decoded)
+    result = md(decoded).strip()
+    # Also strip any markdown-format data URIs that markdownify might produce
+    result = _MD_DATA_IMG_RE.sub('', result)
+    return result
 
 
 _BOILERPLATE_PATTERNS = [

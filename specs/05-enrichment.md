@@ -6,7 +6,7 @@ Jobs arrive from scrapers with raw data: title, description, company name, locat
 
 ## Goal
 
-`jbs enrich` processes unclassified jobs and companies through a four-stage pipeline: data cleanup, rule-based extraction, LLM job classification, and LLM company enrichment. Idempotent, incremental, cost-tracked.
+`jbs enrich` processes unclassified jobs and companies through a five-stage pipeline: data cleanup, rule-based extraction, LLM job classification, LLM company enrichment, and local embedding generation. Idempotent, incremental, cost-tracked.
 
 ## Core Design Decision: Dual LLM Backend
 
@@ -52,6 +52,10 @@ def get_llm_backend():
 |  description, industry, ai_native, funding,       |
 |  size_estimate                                    |
 +---------------------------------------------------+
+|  Stage 4: Embeddings (free, local, ~30s)          |
+|  summary vectors (384d), description vectors      |
+|  (768d), stored in sqlite-vec                     |
++---------------------------------------------------+
 ```
 
 Each stage processes rows where `enriched_at IS NULL` (or the relevant classification field is NULL). Jobs don't change after posting, so no content-change detection is needed.
@@ -83,27 +87,76 @@ Before any enrichment, fix known data quality issues. These are applied to the s
 
 ### 0a. Greenhouse HTML to Markdown
 
-Greenhouse descriptions are stored as raw HTML in the DB. Convert to markdown using `html_to_markdown()` from `jbs/util.py` and update the `description` column. This is a one-time fix for existing data; new scrapes should store markdown from the start.
+Greenhouse descriptions are stored as raw HTML in the DB. The Greenhouse boards API returns HTML content in two forms: raw HTML (`<div>...`) and entity-encoded HTML (`&lt;div&gt;...`). Stage 0a handles both by matching `description LIKE '<%' OR description LIKE '&lt;%'`.
+
+The `html_to_markdown()` function in `jbs/util.py` handles the full cleanup:
+1. `html.unescape()` decodes entity-encoded HTML (`&lt;` -> `<`, `&quot;` -> `"`, etc.)
+2. Strips `<img src="data:...">` tags (inline base64 images that inflate descriptions to MBs)
+3. `markdownify` converts the clean HTML to markdown
+4. Strips any remaining markdown-format data URIs (`![](data:...)`) from the output
 
 ```python
-def fix_greenhouse_html(store):
-    """Convert HTML descriptions to markdown for Greenhouse jobs."""
-    rows = store.conn.execute("""
-        SELECT id, description FROM jobs
-        WHERE site = 'greenhouse'
-          AND description LIKE '<%'
-    """).fetchall()
-    for job_id, desc in rows:
-        md = html_to_markdown(desc)
-        store.conn.execute(
-            "UPDATE jobs SET description = ? WHERE id = ?",
-            (md, job_id),
-        )
-    store.conn.commit()
-    return len(rows)
+# In jbs/util.py
+_DATA_IMG_RE = re.compile(
+    r'<img[^>]*\ssrc=["\']data:[^"\']*["\'][^>]*/?>',
+    re.IGNORECASE,
+)
+_MD_DATA_IMG_RE = re.compile(
+    r'!\[[^\]]*\]\(data:[^)]+\)',
+)
+
+def html_to_markdown(raw_html: str) -> str:
+    if not raw_html:
+        return ""
+    decoded = html_mod.unescape(raw_html)           # entity decode
+    decoded = _DATA_IMG_RE.sub('', decoded)          # strip base64 img tags
+    result = md(decoded).strip()                     # convert to markdown
+    result = _MD_DATA_IMG_RE.sub('', result)         # strip markdown data URIs
+    return result
 ```
 
-### 0b. RemoteOK Encoding Fix
+```python
+# In jbs/enrich.py — Stage 0a
+rows = conn.execute("""
+    SELECT id, description FROM jobs
+    WHERE site = 'greenhouse'
+      AND (description LIKE '<%' OR description LIKE '&lt;%')
+""").fetchall()
+for row in rows:
+    md = html_to_markdown(row["description"])
+    conn.execute(
+        "UPDATE jobs SET description = ? WHERE id = ?",
+        (md, row["id"]),
+    )
+```
+
+This is a one-time fix for existing data; new scrapes should store markdown from the start.
+
+### 0b. Base64 Data URI Stripping
+
+Some descriptions (particularly from KnowBe4 Greenhouse boards) contain inline base64 `data:` images that inflate them to 1.8M characters, causing OOM during embedding generation. Stage 0b runs on **all** jobs (not just Greenhouse) and catches data URIs that survived prior conversion -- for example, descriptions that were already converted to markdown in an earlier run but still contain `![](data:image/...;base64,...)` patterns.
+
+```python
+# In jbs/enrich.py — Stage 0b
+rows = conn.execute("""
+    SELECT id, description FROM jobs
+    WHERE description LIKE '%data:image/%'
+      OR description LIKE '%data:application/%'
+""").fetchall()
+for row in rows:
+    cleaned = strip_data_uris(row["description"])
+    if cleaned != row["description"]:
+        conn.execute(
+            "UPDATE jobs SET description = ? WHERE id = ?",
+            (cleaned, row["id"]),
+        )
+```
+
+The `strip_data_uris()` helper in `jbs/util.py` strips both HTML `<img src="data:...">` tags and markdown `![](data:...)` patterns.
+
+As defense-in-depth, `embeddings.py` also truncates descriptions to `MAX_DESC_CHARS = 30_000` before embedding, preventing OOM even if a large description slips through cleanup.
+
+### 0c. RemoteOK Encoding Fix
 
 ~78% of RemoteOK descriptions have broken Unicode (smart quotes appearing as `a`). Run through encoding normalization to detect and fix UTF-8 mojibake.
 
@@ -125,7 +178,7 @@ def fix_remoteok_encoding(store):
     return len(rows)
 ```
 
-### 0c. Boilerplate Stripping (in memory only)
+### 0d. Boilerplate Stripping (in memory only)
 
 42-71% of Greenhouse/Ashby descriptions have legal boilerplate (EEO statements, ADA disclosures, privacy notices). Strip these with regex patterns matching common boilerplate sections.
 
@@ -146,7 +199,7 @@ def strip_boilerplate(text: str) -> str:
     return text.strip()
 ```
 
-### 0d. Ashby Structured Salary Capture
+### 0e. Ashby Structured Salary Capture
 
 The Ashby API returns `compensationTiers` but the scraper isn't extracting them properly. Fix the scraper to populate `min_amount`/`max_amount`/`currency` from structured data. This is a scraper fix, not an enrichment fix, but it belongs in the data quality scope of this spec.
 
@@ -552,15 +605,57 @@ UPDATE companies SET tech_stack = (
 
 ---
 
+## Stage 4: Embedding Generation (free, local, ~30s for 1000 jobs)
+
+Generates vector embeddings for semantic search. Runs entirely locally via ONNX models — no API key, no LLM backend needed. See spec 06 for model details and text preparation.
+
+### Input Query
+
+```sql
+SELECT j.rowid, j.id, j.title, j.company_raw, j.description,
+       j.job_summary, j.domain, j.tech_stack,
+       COALESCE(c.name, j.company_raw) AS company_name,
+       c.description AS company_description
+FROM jobs j
+LEFT JOIN companies c ON c.id = j.company_id
+WHERE j.is_active = 1
+  AND j.rowid NOT IN (SELECT rowid FROM vec_summaries)
+```
+
+**Scope:** All active jobs with descriptions, not limited to `engineering_role = 1`. Embeddings are cheap locally; casting a wide net means vector search works even before LLM classification runs.
+
+**Watermark:** Vec table membership (`NOT IN vec_summaries`) rather than a column, since embeddings are stored in separate vec tables.
+
+### Processing
+
+1. For each job, build two texts:
+   - Composite text (title + company + summary + domain + tech) — for summary model
+   - Description text (title + company + full description) — for description model
+2. Batch-embed with both models (batches of 100 for progress reporting)
+3. Store embeddings in `vec_summaries` and `vec_descriptions` via `Store.store_embeddings()`
+4. Record in `enrichment_runs` table with `stage='embeddings'`
+
+### Idempotent Behavior
+
+- Without `--force`: skips jobs already in vec tables
+- With `--force`: deletes all entries from both vec tables and re-embeds everything
+
+### Dependencies
+
+Requires `fastembed` and `sqlite-vec`. If either is missing, Stage 4 logs an error with install instructions and skips (does not abort the pipeline).
+
+---
+
 ## CLI Interface
 
 ### Commands
 
 ```bash
-jbs enrich                         # full pipeline (stages 0-3), unprocessed only
+jbs enrich                         # full pipeline (stages 0-4), unprocessed only
 jbs enrich --stage rules           # Stage 0+1 only (free, no API key needed)
 jbs enrich --stage jobs            # Stage 2 only
 jbs enrich --stage companies       # Stage 3 only
+jbs enrich --stage embeddings      # Stage 4 only (free, local)
 jbs enrich --dry-run               # show pending counts and cost estimate
 jbs enrich --force                 # re-enrich everything (ignore enriched_at)
 jbs enrich --source greenhouse     # only enrich jobs from this source
@@ -572,7 +667,7 @@ jbs enrich --source greenhouse     # only enrich jobs from this source
 Enriching 891 unprocessed jobs...
 
   Stage 0: cleanup     891 descriptions fixed  (0.3s)
-    html_to_md: 450   encoding: 43   boilerplate: stripped
+    html_to_md: 450   data_uri: 5   encoding: 43   boilerplate: stripped
   Stage 1: rules       891 jobs processed      (1.2s)
     seniority: 624   visa: 178   salary: 89   years_exp: 534
   Stage 2: jobs        891 jobs submitted       (waiting for batch...)
@@ -581,6 +676,8 @@ Enriching 891 unprocessed jobs...
   Stage 3: companies    63 companies submitted  (waiting for batch...)
     Batch received in 1m 03s
     ai_native: 63   industry: 63   funding: 41
+  Stage 4: embeddings   1083 jobs embedded         (28.3s)
+    summaries: 1083 (384d)   descriptions: 1083 (768d)
 
 Enrichment complete.
   Cost: $0.89 (Haiku, Batch API)
@@ -592,10 +689,11 @@ Enrichment complete.
 ```
 $ jbs enrich --dry-run
 Pending enrichment:
-  Stage 0: 450 Greenhouse HTML descriptions to convert
+  Stage 0: 450 Greenhouse HTML descriptions to convert (raw + entity-encoded)
   Stage 1: 891 jobs for rule-based extraction     (free)
   Stage 2: 891 jobs for LLM classification        (~$0.89, Haiku Batch API)
   Stage 3: 63 companies for LLM classification    (~$0.08, Haiku Batch API)
+  Stage 4: 1083 jobs for embedding generation      (free, local)
   Estimated total: ~$0.97
   Estimated time: ~5 minutes (batch processing)
 ```
@@ -665,4 +763,5 @@ The Batch API gives a 50% discount over standard API pricing. Prompt caching (1-
 | `jbs/store.py` | Modify | Add enrichment-related queries (`get_unenriched_jobs`, `update_enrichment`, new columns in `_ensure_schema`) |
 | `jbs/util.py` | Modify | Add `strip_boilerplate`, `fix_mojibake` functions |
 | `jbs/llm_backend.py` | Create | `LLMBackend` ABC, `AgentSDKBackend`, `BatchAPIBackend`, `get_llm_backend()` selector |
-| `pyproject.toml` | Modify | Add `claude-agent-sdk` to dependencies; add `anthropic>=0.40` to optional: `[project.optional-dependencies] fast-enrich = ["anthropic>=0.40"]` |
+| `jbs/embeddings.py` | Create | Embedding models, text preparation, batch embedding (see spec 06) |
+| `pyproject.toml` | Modify | Add `claude-agent-sdk` to dependencies; add `anthropic>=0.40` to optional: `[project.optional-dependencies] fast-enrich = ["anthropic>=0.40"]`; add vector optional deps |

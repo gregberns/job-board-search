@@ -18,7 +18,7 @@ from jbs.enrich_rules import (
 )
 from jbs.llm_backend import LLMBackend, get_llm_backend
 from jbs.store import Store
-from jbs.util import fix_mojibake, html_to_markdown, strip_boilerplate
+from jbs.util import fix_mojibake, html_to_markdown, strip_boilerplate, strip_data_uris
 
 log = logging.getLogger(__name__)
 
@@ -49,6 +49,8 @@ class EnrichmentPipeline:
             self._run_stage2_jobs(force, source)
         if stage is None or stage == "companies":
             self._run_stage3_companies(force)
+        if stage is None or stage == "embeddings":
+            self._run_stage4_embeddings(force)
 
     # ------------------------------------------------------------------
     # Stage 0: Description cleanup (persisted)
@@ -56,14 +58,14 @@ class EnrichmentPipeline:
 
     def _run_stage0_cleanup(self, source: str | None = None):
         conn = self.store._conn()
-        counts = {"html_to_md": 0, "encoding": 0}
+        counts = {"html_to_md": 0, "data_uri": 0, "encoding": 0}
 
-        # 0a: Greenhouse HTML -> markdown
+        # 0a: Greenhouse HTML -> markdown (raw HTML and entity-encoded HTML)
         if source is None or source == "greenhouse":
             rows = conn.execute("""
                 SELECT id, description FROM jobs
                 WHERE site = 'greenhouse'
-                  AND description LIKE '<%'
+                  AND (description LIKE '<%' OR description LIKE '&lt;%')
             """).fetchall()
             for row in rows:
                 md = html_to_markdown(row["description"])
@@ -73,7 +75,23 @@ class EnrichmentPipeline:
                 )
             counts["html_to_md"] = len(rows)
 
-        # 0b: RemoteOK encoding fix
+        # 0b: Strip base64 data: URIs from any description (catches previously
+        # converted markdown that still contains ![](data:image/...;base64,...))
+        rows = conn.execute("""
+            SELECT id, description FROM jobs
+            WHERE description LIKE '%data:image/%'
+              OR description LIKE '%data:application/%'
+        """).fetchall()
+        for row in rows:
+            cleaned = strip_data_uris(row["description"])
+            if cleaned != row["description"]:
+                conn.execute(
+                    "UPDATE jobs SET description = ? WHERE id = ?",
+                    (cleaned, row["id"]),
+                )
+                counts["data_uri"] += 1
+
+        # 0c: RemoteOK encoding fix
         if source is None or source == "remoteok":
             rows = conn.execute("""
                 SELECT id, description FROM jobs
@@ -90,8 +108,8 @@ class EnrichmentPipeline:
 
         conn.commit()
         log.info(
-            "Stage 0: html_to_md=%d  encoding=%d",
-            counts["html_to_md"], counts["encoding"],
+            "Stage 0: html_to_md=%d  data_uri=%d  encoding=%d",
+            counts["html_to_md"], counts["data_uri"], counts["encoding"],
         )
         return counts
 
@@ -367,6 +385,97 @@ class EnrichmentPipeline:
         return len(companies), results
 
     # ------------------------------------------------------------------
+    # Stage 4: Embedding generation (local, no LLM needed)
+    # ------------------------------------------------------------------
+
+    def _run_stage4_embeddings(self, force: bool = False):
+        if not self.store.has_vec():
+            log.warning(
+                "Stage 4: sqlite-vec not available. "
+                "Install: pip install sqlite-vec fastembed"
+            )
+            return 0
+
+        try:
+            from jbs.embeddings import get_embedder
+        except ImportError:
+            log.warning(
+                "Stage 4: fastembed not available. "
+                "Install: pip install fastembed"
+            )
+            return 0
+
+        conn = self.store._conn()
+
+        # Force: clear existing embeddings
+        if force:
+            conn.execute("DELETE FROM vec_summaries")
+            conn.execute("DELETE FROM vec_descriptions")
+            conn.commit()
+
+        embedder = get_embedder()
+        run_id = f"enrich_emb_{datetime.now(timezone.utc).strftime('%Y-%m-%d_%H%M%S')}"
+        total_embedded = 0
+        batch_size = 32  # Small batches to limit memory (description model uses ~1GB per batch)
+
+        # Fetch and process in pages to avoid loading all descriptions into memory
+        page = 0
+        while True:
+            jobs = self.store.get_unembedded_jobs(limit=batch_size)
+            if not jobs:
+                if page == 0:
+                    log.info("Stage 4: no jobs to embed")
+                break
+
+            if page == 0:
+                # Count total on first page for logging
+                total_pending = conn.execute(
+                    """SELECT COUNT(*) as cnt FROM jobs
+                       WHERE is_active = 1 AND description IS NOT NULL
+                         AND rowid NOT IN (SELECT rowid FROM vec_summaries)"""
+                ).fetchone()["cnt"]
+                log.info("Stage 4: embedding %d jobs...", total_pending)
+
+            # Build texts
+            summary_texts = [embedder.build_composite_text(j) for j in jobs]
+            desc_texts = [embedder.build_description_text(j) for j in jobs]
+
+            # Embed summaries (small model, fast)
+            summary_vecs = embedder.embed_summaries(summary_texts)
+
+            # Embed descriptions (large model, memory-intensive)
+            non_empty_descs = [t for t in desc_texts if t]
+            desc_vecs = embedder.embed_descriptions(non_empty_descs) if non_empty_descs else []
+
+            # Map desc_vecs back accounting for skipped empty texts
+            desc_vec_iter = iter(desc_vecs)
+            rows_to_store = []
+            for j_idx, job in enumerate(jobs):
+                s_vec = summary_vecs[j_idx]
+                d_vec = next(desc_vec_iter) if desc_texts[j_idx] else None
+                rows_to_store.append((job["rowid"], s_vec, d_vec))
+
+            stored = self.store.store_embeddings(rows_to_store)
+            total_embedded += stored
+            page += 1
+
+            log.info(
+                "Stage 4: batch %d — %d embedded (%d total)",
+                page, stored, total_embedded,
+            )
+
+        # Record enrichment run
+        conn.execute(
+            """INSERT INTO enrichment_runs (run_id, started_at, stage, items, model)
+               VALUES (?, ?, 'embeddings', ?, 'local-onnx')""",
+            (run_id, _now_iso(), total_embedded),
+        )
+        conn.commit()
+
+        log.info("Stage 4: embedded %d jobs total", total_embedded)
+        return total_embedded
+
+    # ------------------------------------------------------------------
     # Dry run
     # ------------------------------------------------------------------
 
@@ -407,12 +516,22 @@ class EnrichmentPipeline:
             "SELECT COUNT(*) as cnt FROM companies WHERE enriched_at IS NULL"
         ).fetchone()["cnt"]
 
+        # Stage 4 count
+        stage4 = 0
+        if self.store.has_vec():
+            stage4 = conn.execute(
+                """SELECT COUNT(*) as cnt FROM jobs
+                   WHERE is_active = 1 AND description IS NOT NULL
+                     AND rowid NOT IN (SELECT rowid FROM vec_summaries)"""
+            ).fetchone()["cnt"]
+
         info = {
             "stage0_html": gh_html,
             "stage0_encoding": rok_enc,
             "stage1": stage1,
             "stage2": stage2,
             "stage3": stage3,
+            "stage4": stage4,
         }
 
         log.info(
@@ -420,7 +539,8 @@ class EnrichmentPipeline:
             "  Stage 0: %d HTML, %d encoding\n"
             "  Stage 1: %d jobs (free)\n"
             "  Stage 2: %d jobs for LLM\n"
-            "  Stage 3: %d companies for LLM",
-            gh_html, rok_enc, stage1, stage2, stage3,
+            "  Stage 3: %d companies for LLM\n"
+            "  Stage 4: %d jobs for embedding (free, local)",
+            gh_html, rok_enc, stage1, stage2, stage3, stage4,
         )
         return info

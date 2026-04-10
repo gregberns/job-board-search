@@ -11,6 +11,9 @@ import webbrowser
 from pathlib import Path
 
 import click
+from dotenv import load_dotenv
+
+load_dotenv()
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.table import Table
@@ -287,6 +290,7 @@ _SEARCH_CSV_KEYS = _SEARCH_JSON_KEYS
 @click.option("--tag", multiple=True, help="Filter by tag")
 @click.option("--interest", default=None, help="Filter by interest level")
 @click.option("--engineering", is_flag=True, help="Only engineering roles")
+@click.option("--vec", default=None, help="Semantic search query (requires embeddings)")
 @click.option("--include-inactive", is_flag=True, help="Include deactivated jobs")
 @click.option("--sort", default="date", type=click.Choice(["date", "salary", "company", "ai-native"]))
 @click.option("--limit", default=50, type=int)
@@ -294,11 +298,14 @@ _SEARCH_CSV_KEYS = _SEARCH_JSON_KEYS
 @click.pass_context
 def search(ctx, query, new_only, company, location, remote_flag, onsite, source,
            salary_min, days, ai_native, seniority, domain, industry,
-           tag, interest, engineering, include_inactive, sort, limit, offset):
+           tag, interest, engineering, vec, include_inactive, sort, limit, offset):
     """Query the job database."""
     from jbs.models import SearchQuery
 
     store = _require_db(ctx)
+
+    if vec and not store.has_vec():
+        click.echo("Warning: --vec requires sqlite-vec and fastembed. Install: pip install sqlite-vec fastembed", err=True)
 
     work_arr = None
     if remote_flag:
@@ -321,6 +328,7 @@ def search(ctx, query, new_only, company, location, remote_flag, onsite, source,
         tags=list(tag) if tag else None,
         engineering_only=engineering,
         include_inactive=include_inactive,
+        vec_query=vec,
         limit=limit,
         offset=offset,
     )
@@ -438,7 +446,7 @@ def show(ctx, job_id, no_desc, open_url):
 # -----------------------------------------------------------------------
 
 @cli.command()
-@click.option("--stage", type=click.Choice(["rules", "jobs", "companies"]), default=None)
+@click.option("--stage", type=click.Choice(["rules", "jobs", "companies", "embeddings"]), default=None)
 @click.option("--dry-run", is_flag=True)
 @click.option("--source", default=None)
 @click.option("--force", is_flag=True)
@@ -859,6 +867,58 @@ def tokens_discover(ctx, phase, show_status):
 
     run_discovery(store, phase=phase, verbose=ctx.obj["verbose"])
     store.close()
+
+
+# -----------------------------------------------------------------------
+# jbs models (group)
+# -----------------------------------------------------------------------
+
+@cli.group()
+def models():
+    """Embedding model management."""
+    pass
+
+
+@models.command(name="download")
+@click.pass_context
+def models_download(ctx):
+    """Download all embedding models (run once before jbs enrich --stage embeddings)."""
+    import logging
+
+    from jbs.embeddings import download_models, get_model_status
+
+    logging.basicConfig(level=logging.INFO)
+    console = Console(no_color=ctx.obj["no_color"])
+
+    console.print("Downloading embedding models...")
+    results = download_models()
+
+    for name, ok in results.items():
+        status = "[green]OK[/green]" if ok else "[red]FAILED[/red]"
+        console.print(f"  {name}: {status}")
+
+    if all(results.values()):
+        console.print("\nAll models ready.")
+    else:
+        console.print("\n[red]Some models failed to download.[/red]")
+        raise SystemExit(1)
+
+
+@models.command(name="list")
+@click.pass_context
+def models_list(ctx):
+    """Show status of embedding models."""
+    from jbs.embeddings import get_model_status
+
+    console = Console(no_color=ctx.obj["no_color"])
+    statuses = get_model_status()
+
+    for m in statuses:
+        icon = "[green]cached[/green]" if m["cached"] else "[red]missing[/red]"
+        console.print(f"  {m['role']:<14} {m['name']:<45} {icon}")
+
+    if not all(m["cached"] for m in statuses):
+        console.print("\nRun [bold]jbs models download[/bold] to fetch missing models.")
 
 
 # -----------------------------------------------------------------------

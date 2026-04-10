@@ -25,6 +25,7 @@ job-board-search/
 │   ├── models.py           # Job, ScrapeResult, enums
 │   ├── orchestrator.py     # Runs scrapers, writes to store
 │   ├── enrich.py           # LLM enrichment pipeline
+│   ├── embeddings.py       # Local embedding models, text prep, RRF, re-ranking
 │   ├── util.py             # Inlined helpers (see section 12)
 │   └── scrapers/
 │       ├── __init__.py     # Registry (@register decorator, explicit imports)

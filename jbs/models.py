@@ -76,5 +76,6 @@ class SearchQuery:
     include_inactive: bool = False
     tags: list[str] | None = None
     rating: int | None = None
+    vec_query: str | None = None
     limit: int = 50
     offset: int = 0

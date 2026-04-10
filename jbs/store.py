@@ -2,22 +2,40 @@
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
+import numpy as np
+
 from jbs.models import Job, SearchQuery
 from jbs.util import normalize_company_name
+
+log = logging.getLogger(__name__)
 
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _load_vec(conn: sqlite3.Connection) -> bool:
+    """Try to load sqlite-vec extension. Returns True on success."""
+    try:
+        import sqlite_vec
+        conn.enable_load_extension(True)
+        sqlite_vec.load(conn)
+        return True
+    except (ImportError, Exception) as exc:
+        log.debug("sqlite-vec not available: %s", exc)
+        return False
+
+
 class Store:
     def __init__(self, db_path: Path | str):
         self.db_path = str(db_path)
         self._connection: sqlite3.Connection | None = None
+        self._vec_loaded = False
         self._ensure_schema()
 
     def _conn(self) -> sqlite3.Connection:
@@ -27,7 +45,13 @@ class Store:
             self._connection.execute("PRAGMA journal_mode=WAL")
             self._connection.execute("PRAGMA foreign_keys=ON")
             self._connection.row_factory = sqlite3.Row
+            self._vec_loaded = _load_vec(self._connection)
         return self._connection
+
+    def has_vec(self) -> bool:
+        """Return True if sqlite-vec extension is loaded."""
+        self._conn()  # ensure connection (and vec loading) has happened
+        return self._vec_loaded
 
     def close(self):
         if self._connection is not None:
@@ -344,6 +368,18 @@ class Store:
 
         # Rebuild FTS index to catch existing rows
         self.rebuild_fts()
+
+        # --- Vector tables (sqlite-vec) ---
+        if self._vec_loaded:
+            from jbs.embeddings import SUMMARY_DIM, DESC_DIM
+            conn.execute(
+                f"CREATE VIRTUAL TABLE IF NOT EXISTS vec_summaries "
+                f"USING vec0(embedding float[{SUMMARY_DIM}] distance_metric=cosine)"
+            )
+            conn.execute(
+                f"CREATE VIRTUAL TABLE IF NOT EXISTS vec_descriptions "
+                f"USING vec0(embedding float[{DESC_DIM}] distance_metric=cosine)"
+            )
 
         conn.commit()
 
@@ -769,7 +805,10 @@ class Store:
     # ------------------------------------------------------------------
 
     def search(self, query: SearchQuery) -> list[dict]:
-        """Search jobs with structured filters and FTS5 full-text search."""
+        """Search jobs with structured filters and FTS5 full-text search.
+        Dispatches to hybrid_search when vec_query is provided."""
+        if getattr(query, 'vec_query', None) and self._vec_loaded:
+            return self.hybrid_search(query)
         conn = self._conn()
         params: list = []
         where: list[str] = []
@@ -934,6 +973,277 @@ class Store:
             ORDER BY similarity DESC, j.date_posted DESC LIMIT ?"""
         rows = conn.execute(sql, [domain, seniority, work_arr, job_id, limit]).fetchall()
         return [dict(r) for r in rows]
+
+    # ------------------------------------------------------------------
+    # Hybrid search (vector + FTS5 + structured filters)
+    # ------------------------------------------------------------------
+
+    def hybrid_search(self, query: SearchQuery) -> list[dict]:
+        """Vector + FTS5 + structured filters combined via RRF and re-ranking.
+
+        1. Structured filters -> candidate ID set
+        2. FTS5 keyword ranking (if query.text)
+        3. Vector KNN on summaries + descriptions (query.vec_query)
+        4. RRF to merge ranked lists
+        5. Cross-encoder re-rank top 50
+        6. Fetch full results for top-N
+        """
+        from jbs.embeddings import get_embedder, rrf_combine
+
+        conn = self._conn()
+
+        # --- Build structured WHERE clause (no FTS, no scoring) ---
+        params: list = []
+        where: list[str] = []
+
+        if not query.include_inactive:
+            where.append("j.is_active = 1")
+
+        for field, vals in [
+            ("j.site", query.sites),
+            ("j.seniority", query.seniority),
+            ("j.domain", query.domains),
+            ("j.work_arrangement", query.work_arrangement),
+        ]:
+            if vals:
+                placeholders = ",".join("?" * len(vals))
+                where.append(f"{field} IN ({placeholders})")
+                params.extend(vals)
+
+        if query.industries:
+            placeholders = ",".join("?" * len(query.industries))
+            where.append(f"c.industry IN ({placeholders})")
+            params.extend(query.industries)
+
+        if query.companies:
+            placeholders = ",".join("?" * len(query.companies))
+            where.append(f"LOWER(c.name) IN ({placeholders})")
+            params.extend(c.lower() for c in query.companies)
+
+        if query.min_salary is not None:
+            where.append("COALESCE(j.salary_usd_max, j.max_amount) >= ?")
+            params.append(query.min_salary)
+        if query.max_salary is not None:
+            where.append("COALESCE(j.salary_usd_min, j.min_amount) <= ?")
+            params.append(query.max_salary)
+
+        if query.engineering_only:
+            where.append("j.engineering_role = 1")
+
+        if query.ai_native_min is not None:
+            where.append("COALESCE(c.ai_native, 0) >= ?")
+            params.append(query.ai_native_min)
+
+        if query.hours_old:
+            where.append("j.date_posted >= datetime('now', ?)")
+            params.append(f"-{query.hours_old} hours")
+
+        if query.new_only:
+            where.append("j.last_seen_run = (SELECT MAX(run_id) FROM runs)")
+
+        if query.tags:
+            for tag in query.tags:
+                where.append("j.id IN (SELECT jt.job_id FROM job_tags jt WHERE jt.tag = ?)")
+                params.append(tag)
+
+        where_clause = " AND ".join(where) if where else "1=1"
+
+        # Get candidate IDs passing structured filters
+        candidate_sql = f"""SELECT j.id FROM jobs j
+            LEFT JOIN companies c ON c.id = j.company_id
+            WHERE {where_clause}"""
+        candidate_ids = {r["id"] for r in conn.execute(candidate_sql, params).fetchall()}
+
+        if not candidate_ids:
+            return []
+
+        # --- Gather ranked lists ---
+        ranked_lists: list[list[tuple[str, float]]] = []
+
+        # FTS5 keyword ranking
+        if query.text:
+            fts_results = self._fts_rank(query.text, limit=500)
+            fts_filtered = [(jid, score) for jid, score in fts_results if jid in candidate_ids]
+            if fts_filtered:
+                ranked_lists.append(fts_filtered)
+
+        # Vector KNN
+        embedder = get_embedder()
+
+        summary_q = embedder.query_summary(query.vec_query)
+        summary_results = self._vec_knn("vec_summaries", summary_q, k=500)
+        summary_filtered = [(jid, dist) for jid, dist in summary_results if jid in candidate_ids]
+        if summary_filtered:
+            ranked_lists.append(summary_filtered)
+
+        desc_q = embedder.query_description(query.vec_query)
+        desc_results = self._vec_knn("vec_descriptions", desc_q, k=500)
+        desc_filtered = [(jid, dist) for jid, dist in desc_results if jid in candidate_ids]
+        if desc_filtered:
+            ranked_lists.append(desc_filtered)
+
+        if not ranked_lists:
+            return []
+
+        # --- RRF combine ---
+        combined = rrf_combine(*ranked_lists)
+
+        # --- Cross-encoder re-rank top 50 ---
+        rerank_count = min(50, len(combined))
+        rerank_ids = [jid for jid, _score in combined[:rerank_count]]
+
+        # Fetch job data for re-ranking text
+        placeholders = ",".join("?" * len(rerank_ids))
+        rerank_rows = conn.execute(
+            f"""SELECT j.id, j.title, j.job_summary, j.description,
+                       COALESCE(c.name, j.company_raw) AS company_name
+                FROM jobs j
+                LEFT JOIN companies c ON c.id = j.company_id
+                WHERE j.id IN ({placeholders})""",
+            rerank_ids,
+        ).fetchall()
+        id_to_rerank = {r["id"]: r for r in rerank_rows}
+
+        # Build rerank documents
+        rerank_docs = []
+        rerank_doc_ids = []
+        for jid in rerank_ids:
+            r = id_to_rerank.get(jid)
+            if r:
+                title = r["title"] or ""
+                company = r["company_name"] or ""
+                summary = r["job_summary"] or (r["description"] or "")[:500]
+                rerank_docs.append(f"{title} at {company}. {summary}")
+                rerank_doc_ids.append(jid)
+
+        if rerank_docs:
+            reranked = embedder.rerank(query.vec_query, rerank_docs, top_n=rerank_count)
+            final_order = [rerank_doc_ids[idx] for idx, _score in reranked]
+            # Append any RRF results beyond the reranked set
+            reranked_set = set(final_order)
+            for jid, _score in combined[rerank_count:]:
+                if jid not in reranked_set:
+                    final_order.append(jid)
+        else:
+            final_order = [jid for jid, _score in combined]
+
+        # Apply offset/limit
+        page = final_order[query.offset:query.offset + query.limit]
+        if not page:
+            return []
+
+        # --- Fetch full details ---
+        placeholders = ",".join("?" * len(page))
+        rows = conn.execute(
+            f"""SELECT j.*, COALESCE(c.name, j.company_raw) AS company_name,
+                       c.industry, c.ai_native, j.job_summary
+                FROM jobs j
+                LEFT JOIN companies c ON c.id = j.company_id
+                WHERE j.id IN ({placeholders})""",
+            page,
+        ).fetchall()
+
+        # Preserve ordering
+        id_to_row = {dict(r)["id"]: dict(r) for r in rows}
+        rrf_scores = {jid: score for jid, score in combined}
+        result = []
+        for jid in page:
+            if jid in id_to_row:
+                row = id_to_row[jid]
+                row["score"] = rrf_scores.get(jid, 0)
+                result.append(row)
+        return result
+
+    # ------------------------------------------------------------------
+    # Vector search
+    # ------------------------------------------------------------------
+
+    def has_vec(self) -> bool:
+        """Check if sqlite-vec is loaded and vec tables exist."""
+        return self._vec_loaded
+
+    def get_vec_counts(self) -> dict[str, int]:
+        """Count of embeddings in each vec table."""
+        conn = self._conn()
+        counts = {}
+        for tbl in ("vec_summaries", "vec_descriptions"):
+            try:
+                counts[tbl] = conn.execute(f"SELECT COUNT(*) FROM {tbl}").fetchone()[0]
+            except sqlite3.OperationalError:
+                counts[tbl] = 0
+        return counts
+
+    def get_unembedded_jobs(self, limit: int = 500) -> list[dict]:
+        """Get active jobs that don't yet have summary embeddings."""
+        conn = self._conn()
+        rows = conn.execute(
+            """SELECT j.rowid, j.id, j.title, j.company_raw, j.description,
+                      j.job_summary, j.domain, j.tech_stack,
+                      COALESCE(c.name, j.company_raw) AS company_name,
+                      c.description AS company_description
+               FROM jobs j
+               LEFT JOIN companies c ON c.id = j.company_id
+               WHERE j.is_active = 1
+                 AND j.description IS NOT NULL
+                 AND j.rowid NOT IN (SELECT rowid FROM vec_summaries)
+               ORDER BY j.date_posted DESC
+               LIMIT ?""",
+            (limit,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def store_embeddings(
+        self,
+        rows: list[tuple[int, np.ndarray | None, np.ndarray | None]],
+    ) -> int:
+        """Store embedding vectors. rows: [(rowid, summary_vec, desc_vec), ...].
+        Returns count stored."""
+        conn = self._conn()
+        stored = 0
+        for rowid, summary_vec, desc_vec in rows:
+            if summary_vec is not None:
+                blob = summary_vec.astype(np.float32).tobytes()
+                conn.execute(
+                    "INSERT OR REPLACE INTO vec_summaries(rowid, embedding) VALUES (?, ?)",
+                    (rowid, blob),
+                )
+                stored += 1
+            if desc_vec is not None:
+                blob = desc_vec.astype(np.float32).tobytes()
+                conn.execute(
+                    "INSERT OR REPLACE INTO vec_descriptions(rowid, embedding) VALUES (?, ?)",
+                    (rowid, blob),
+                )
+        conn.commit()
+        return stored
+
+    def _vec_knn(self, table: str, query_vec: np.ndarray, k: int = 200) -> list[tuple[str, float]]:
+        """Run KNN on a vec table. Returns [(job_id, distance), ...]."""
+        conn = self._conn()
+        blob = query_vec.astype(np.float32).tobytes()
+        rows = conn.execute(
+            f"""SELECT v.rowid, v.distance, j.id
+                FROM {table} v
+                JOIN jobs j ON j.rowid = v.rowid
+                WHERE v.embedding MATCH ? AND k = ?
+                ORDER BY v.distance""",
+            (blob, k),
+        ).fetchall()
+        return [(r["id"], r["distance"]) for r in rows]
+
+    def _fts_rank(self, text: str, limit: int = 200) -> list[tuple[str, float]]:
+        """Run FTS5 search. Returns [(job_id, rank_score), ...]."""
+        conn = self._conn()
+        rows = conn.execute(
+            """SELECT j.id, (1.0 / (1.0 + ABS(jobs_fts.rank))) AS score
+               FROM jobs_fts
+               JOIN jobs j ON j.rowid = jobs_fts.rowid
+               WHERE jobs_fts MATCH ?
+               ORDER BY score DESC
+               LIMIT ?""",
+            (text, limit),
+        ).fetchall()
+        return [(r["id"], r["score"]) for r in rows]
 
     def get_stats(self) -> dict:
         conn = self._conn()

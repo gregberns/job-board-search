@@ -39,3 +39,7 @@ JobSpy/.venv/
 
 # Agent mail config
 .mcp.json
+
+# kerf (except project-identifier)
+.kerf/
+!.kerf/project-identifier

@@ -2,11 +2,11 @@
 
 ## Problem
 
-3,000+ jobs in SQLite with classification data (seniority, domain, ai_native, industry) spread across `jobs` and `companies` tables, but no way to search or filter without hand-writing SQL.
+3,000+ jobs in SQLite with classification data (seniority, domain, ai_native, industry) spread across `jobs` and `companies` tables, but no way to search or filter without hand-writing SQL. Keyword search cannot express subjective queries like "marketplace platform where software is the core product."
 
 ## Goal
 
-FTS5 search + structured filters + a simple hardcoded ranking formula. Filters do the heavy lifting; ranking is a tiebreaker.
+FTS5 search + structured filters + vector semantic search, combined via hybrid retrieval with re-ranking. Structured filters do the heavy lifting for objective criteria; vector search handles subjective/semantic queries; ranking merges the signals.
 
 ## Schema Additions
 
@@ -41,6 +41,10 @@ Backfill: `INSERT INTO jobs_fts(rowid, title, company, description, domain) SELE
 
 **Why `industry` is not in FTS:** `industry` lives on the `companies` table, not `jobs`. It's a structured enum field better used as a filter (`--industry AI/ML`) than full-text searched. The FTS table only indexes columns from `jobs`.
 
+### Vector Tables
+
+See spec 06 for sqlite-vec virtual tables (`vec_summaries`, `vec_descriptions`).
+
 ### Supporting Tables
 
 Defined in spec 02: `job_annotations` (single-row per job), `job_tags` (flat strings), `company_preferences` (per company, joined via `company_id`). Not redefined here.
@@ -51,6 +55,7 @@ Defined in spec 02: `job_annotations` (single-row per job), `job_tags` (flat str
 @dataclass
 class SearchQuery:
     text: str | None = None              # FTS5 syntax: '"machine learning" OR pytorch'
+    vec_query: str | None = None         # Natural-language semantic search (see spec 06)
     sites: list[str] | None = None       # ["greenhouse", "lever"]
     companies: list[str] | None = None   # matched against companies.name
     seniority: list[str] | None = None   # ["senior", "staff", "principal"]
@@ -75,7 +80,18 @@ class SearchQuery:
 
 **`engineering_only` defaults to False.** By default, search returns all jobs. Pass `--engineering` to limit to engineering roles. This avoids hiding unclassified or borderline roles.
 
+**`vec_query` is independent of `text`.** Both can be used together (3-signal hybrid: FTS + summary vector + description vector). When only `vec_query` is set, structured filters still apply; FTS is skipped.
+
+## Search Dispatch
+
+`Store.search()` checks `vec_query`:
+- If `vec_query` is set and sqlite-vec is loaded: dispatch to `Store.hybrid_search()` (spec 06 pipeline).
+- If `vec_query` is set but sqlite-vec is NOT loaded: warn and fall back to FTS-only search.
+- If `vec_query` is absent: existing FTS + structured filter path, unchanged.
+
 ## Ranking
+
+### FTS-Only Ranking (no vec_query)
 
 One hardcoded formula. Not configurable, not tunable per search.
 
@@ -88,6 +104,10 @@ Bonuses and penalties (additive on a normalized score):
 - Company rated positively (`company_preferences.rating` > 3): **+0.1**
 - `companies.ai_native > 0.7`: **+0.1**
 - Company rated poorly (`company_preferences.rating` <= 2): **-0.3**
+
+### Hybrid Ranking (with vec_query)
+
+RRF fusion of FTS5 + vector signals, followed by cross-encoder re-ranking. See spec 06 for the full pipeline. The hardcoded bonuses/penalties above are not applied in hybrid mode — the cross-encoder's relevance scoring subsumes them.
 
 ## FTS5 Query Syntax
 
@@ -251,6 +271,12 @@ jbs search --rating 4
 # Include inactive (deactivated) jobs in results
 jbs search "python" --include-inactive
 
+# Semantic search: find companies where software IS the product
+jbs search --vec "marketplace platform, real-time coordination, users depend on it" --engineering --seniority senior,staff
+
+# Hybrid: keyword + semantic + structured filters
+jbs search "distributed systems" --vec "AI-native startup, small team" --engineering --remote
+
 # Shell alias for a recurring search
 alias jbs-ml='jbs search "ML" --ai-native 0.7 --remote --engineering'
 ```
@@ -259,13 +285,13 @@ alias jbs-ml='jbs search "ML" --ai-native 0.7 --remote --engineering'
 
 | File | Action | Description |
 |------|--------|-------------|
-| `jbs/store.py` | Modify | Add FTS5 virtual table, triggers, `_build_query()`, `find_similar()` |
-| `jbs/models.py` | Modify | Add `SearchQuery` dataclass |
+| `jbs/store.py` | Modify | Add FTS5 virtual table, triggers, `_build_query()`, `find_similar()`, `hybrid_search()` |
+| `jbs/models.py` | Modify | Add `SearchQuery` dataclass (including `vec_query`) |
+| `jbs/embeddings.py` | Create | Embedding models, RRF, re-ranking (see spec 06) |
 
 ## Non-Goals
 
 - **Saved searches table** -- use shell aliases instead.
 - **Discovery mode / preference profiles** -- filters are the discovery mode.
-- **Configurable ranking weights** -- one formula, hardcoded.
-- **Embeddings** -- structured fields suffice at 3k jobs scale.
+- **Configurable ranking weights** -- one formula, hardcoded (FTS path); RRF + re-ranking (hybrid path).
 - **Multi-user** -- single user, no auth.

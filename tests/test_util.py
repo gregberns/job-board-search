@@ -14,6 +14,7 @@ from jbs.util import (
     normalize_company_name,
     parse_location,
     strip_boilerplate,
+    strip_data_uris,
 )
 
 
@@ -307,3 +308,68 @@ class TestHtmlToMarkdown:
         result = html_to_markdown('<ul><li>Item 1</li><li>Item 2</li></ul>')
         assert 'Item 1' in result
         assert 'Item 2' in result
+
+    def test_entity_encoded_html(self):
+        """Entity-encoded HTML (from Greenhouse API) is decoded before conversion."""
+        result = html_to_markdown('&lt;p&gt;Hello &lt;strong&gt;world&lt;/strong&gt;&lt;/p&gt;')
+        assert 'Hello' in result
+        assert 'world' in result
+        assert '&lt;' not in result
+
+    def test_strips_base64_images(self):
+        """Inline base64 images are stripped (they inflate descriptions to MBs)."""
+        html = '<p>Job description</p><img src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJ"/><p>More details</p>'
+        result = html_to_markdown(html)
+        assert 'Job description' in result
+        assert 'More details' in result
+        assert 'data:image' not in result
+        assert 'iVBOR' not in result
+
+    def test_preserves_regular_images(self):
+        """Regular URL images are preserved (converted to markdown)."""
+        html = '<p>Text</p><img src="https://example.com/logo.png" alt="Logo"/>'
+        result = html_to_markdown(html)
+        assert 'example.com/logo.png' in result
+
+    def test_entity_encoded_with_base64(self):
+        """Entity-encoded HTML with base64 images: decode then strip."""
+        html = '&lt;p&gt;Description&lt;/p&gt;&lt;img src=&quot;data:image/png;base64,abc123&quot;/&gt;&lt;p&gt;End&lt;/p&gt;'
+        result = html_to_markdown(html)
+        assert 'Description' in result
+        assert 'End' in result
+        assert 'data:image' not in result
+
+    def test_idempotent_on_markdown(self):
+        """Already-converted markdown passes through without damage."""
+        md_text = '**Bold** text with [links](https://example.com)\n\n- Item 1\n- Item 2'
+        result = html_to_markdown(md_text)
+        assert 'Bold' in result
+        assert 'links' in result
+
+
+# ---------------------------------------------------------------------------
+# strip_data_uris
+# ---------------------------------------------------------------------------
+
+class TestStripDataUris:
+    def test_strips_html_data_img(self):
+        text = 'Hello <img src="data:image/png;base64,abc123"/> world'
+        result = strip_data_uris(text)
+        assert 'Hello' in result
+        assert 'world' in result
+        assert 'data:image' not in result
+
+    def test_strips_markdown_data_img(self):
+        text = 'Hello ![logo](data:image/jpeg;base64,/9j/4AAQSkZJ) world'
+        result = strip_data_uris(text)
+        assert 'Hello' in result
+        assert 'world' in result
+        assert 'data:image' not in result
+
+    def test_preserves_normal_text(self):
+        text = 'No images here, just text about data processing.'
+        assert strip_data_uris(text) == text
+
+    def test_preserves_regular_urls(self):
+        text = '![logo](https://example.com/img.png)'
+        assert strip_data_uris(text) == text
