@@ -31,6 +31,34 @@ def _load_vec(conn: sqlite3.Connection) -> bool:
         return False
 
 
+def _ensure_vec_table(conn, table_name, dim):
+    """Create or migrate a vec table to the expected dimension."""
+    row = conn.execute(
+        "SELECT dim FROM vec_meta WHERE table_name = ?", (table_name,)
+    ).fetchone()
+
+    if row and row["dim"] == dim:
+        return  # correct dim, nothing to do
+
+    if row:
+        # Dimension mismatch — drop and recreate
+        log.info("Migrating %s: %dd -> %dd", table_name, row["dim"], dim)
+        conn.execute(f"DROP TABLE IF EXISTS {table_name}")
+    elif conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table_name,)).fetchone():
+        # Table exists but no meta entry (pre-meta database) — drop stale table
+        log.info("Recreating %s (no dimension record, assuming stale)", table_name)
+        conn.execute(f"DROP TABLE IF EXISTS {table_name}")
+
+    conn.execute(
+        f"CREATE VIRTUAL TABLE IF NOT EXISTS {table_name} "
+        f"USING vec0(embedding float[{dim}] distance_metric=cosine)"
+    )
+    conn.execute(
+        "INSERT OR REPLACE INTO vec_meta (table_name, dim) VALUES (?, ?)",
+        (table_name, dim),
+    )
+
+
 class Store:
     def __init__(self, db_path: Path | str):
         self.db_path = str(db_path)
@@ -372,14 +400,9 @@ class Store:
         # --- Vector tables (sqlite-vec) ---
         if self._vec_loaded:
             from jbs.embeddings import SUMMARY_DIM, DESC_DIM
-            conn.execute(
-                f"CREATE VIRTUAL TABLE IF NOT EXISTS vec_summaries "
-                f"USING vec0(embedding float[{SUMMARY_DIM}] distance_metric=cosine)"
-            )
-            conn.execute(
-                f"CREATE VIRTUAL TABLE IF NOT EXISTS vec_descriptions "
-                f"USING vec0(embedding float[{DESC_DIM}] distance_metric=cosine)"
-            )
+            conn.execute("CREATE TABLE IF NOT EXISTS vec_meta (table_name TEXT PRIMARY KEY, dim INTEGER NOT NULL)")
+            _ensure_vec_table(conn, "vec_summaries", SUMMARY_DIM)
+            _ensure_vec_table(conn, "vec_descriptions", DESC_DIM)
 
         conn.commit()
 
