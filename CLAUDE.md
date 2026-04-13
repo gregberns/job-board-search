@@ -133,6 +133,41 @@ Don't skip the planning process. Measure twice, cut once.
 
 See `plans/PROCESS.md`. Use `/spec` command for new features.
 
+## Company Research
+
+Research and pipeline tracking live in `company-research/` (git-tracked, unlike `data/`).
+
+### Layout
+
+```
+company-research/
+├── batch-01-top-picks.md           # Agent research + user feedback
+├── batch-02-industrial-ops.md      # Agent research + user feedback
+├── batch-03-legal-health-climate-fp.md  # Agent research + user feedback
+├── raw-agent-*.txt                 # Raw agent output (provenance)
+└── pipeline/
+    ├── README.md                   # Funnel stages and conventions
+    ├── discovered.md               # Identified as interesting
+    ├── investigating.md            # Actively researching
+    ├── reaching-out.md             # Preparing contact
+    ├── contacted.md                # Outreach sent
+    ├── interviewing.md             # Active interviews
+    └── passed.md                   # Not pursuing (with reasons)
+```
+
+### Conventions
+
+- **Batch files have user feedback** (the "Your take:" sections) -- never overwrite or regenerate them.
+- **Pipeline stage files are append-only logs** -- add dated entries, never remove.
+- **Raw agent files** are kept for provenance, not meant for direct reading.
+- **Framework reference**: Job search criteria and recruiter brief live at `/Users/gb/github/job-search/what-im-looking-for/` (context.md, framework.md, recruiter-brief.md).
+
+### Token Files
+
+- `tokens/` directory contains ATS token files (greenhouse, lever, ashby, workable) used as import source by `jbs init`.
+- After init, the database is the source of truth -- token files are just the seed.
+- New tokens discovered during research get added to the token files first, then imported via `jbs init`.
+
 ## Important Notes
 
 - **Venv** is at `JobSpy/.venv/` (historical, from the submodule era)

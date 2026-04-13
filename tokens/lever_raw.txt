@@ -253,3 +253,19 @@ zotecpartners
 electric-twin
 blackshark
 findigs
+# Added 2026-04-13 — company research expansion
+gridware
+duffel
+metabase
+waabi
+mujininc
+brightmachines
+field-ai
+nomagic
+NimbleAI
+regrello
+MachinaLabs
+ivo
+eve
+curri
+foresea-technologies

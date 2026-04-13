@@ -555,3 +555,26 @@ nuancelabs
 embed
 quadraturecapital
 embed
+# Added 2026-04-13 — company research expansion
+hasura
+overstory
+augury
+ahrefsjobs
+coherehealth
+smarterdx
+layerhealth
+sironamedical
+cresta
+litify
+climateai
+loop
+axiomaticai
+lucidbots
+bedrockrobotics
+pathrobotics
+nearspacelabs
+samayaai
+processstreet
+worldlabs
+fireworksai
+medeloop
