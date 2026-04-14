@@ -4,9 +4,9 @@
 
 `jbs` — a local-first CLI tool for finding the right engineering job. Scrapes 5 job board sources, stores in SQLite, enriches with LLM classification + local embeddings, and provides keyword + semantic search/filter/annotation. Python 3.12, Click + Rich CLI, Claude Haiku for enrichment via subscription, MLX for local embeddings on Apple Silicon.
 
-## Current State: Fully Operational (2026-04-10)
+## Current State: Company Research Phase (2026-04-14)
 
-All features working end-to-end, including vector search. Specs in sync with code.
+Core tool fully operational. Now in active company research — searching, evaluating, and building a pipeline of target companies.
 
 ### Database (data/jobs.db)
 - **4,801 jobs** (4,292 active, 509 inactive)
@@ -30,78 +30,72 @@ All features working end-to-end, including vector search. Specs in sync with cod
 - `jbs show`, `jbs annotate`, `jbs apply`, `jbs stats`, `jbs tokens` — all working
 - **527 tests passing**
 
----
+### Company Research Pipeline
+- **6 batches** of companies researched (35+ from batches 1-3 with user feedback, 18 AI-first, 16 Rust, 18 remote-first)
+- **Pipeline structure** at `company-research/pipeline/` — discovered → investigating → reaching-out → contacted → interviewing → passed
+- **Framework** at `/Users/gb/github/job-search/what-im-looking-for/` — four-filter flywheel (Dead Inside? → Hard Problem? → Software = Lever? → Compounds?)
+- **Pass patterns** documented at `company-research/pass-patterns.md`
+- **Framework search criteria** at `company-research/framework-search-criteria.md`
 
-## What Was Done This Session (2026-04-10)
+### Pipeline Status (as of 2026-04-14)
+- **ADVANCE (3):** PermitFlow, Kallikor, Foxglove
+- **MAYBE (10):** Hasura, Nominal, V7, Pylon, Augury, SewerAI, Tractian, Duffel, Slip Robotics, Sylvera
+- **BLOCKED (8):** Gecko Robotics, Terminal Industries, Vorto, Ambience, Abridge, Deeptune (location), Ahrefs (not hiring), Imandra (no response)
+- **PASS (12+):** Legal x4, consumer x2, infra, BI, climate/energy x2, healthcare, defense
+- **Batch 4-6 pending review:** user reviewed batch 4 (all robotics misses), batch 5 (mostly robotics misses), batch 6 (remote-first, pending)
 
-### 1. Description Cleanup Bug Fix (kerf: `desc-cleanup`, SQUARE)
-**Problem:** 2,025 Greenhouse descriptions were entity-encoded HTML (`&lt;div&gt;`); 18 had 1.8M chars of inline base64 images. Stage 0 cleanup missed them. Embedding generation OOM'd.
+### Token Coverage
+- **Greenhouse:** 580 tokens (22 added 2026-04-13)
+- **Lever:** 271 tokens (15 added 2026-04-13)
+- **Ashby:** 99 tokens (28 added 2026-04-13)
+- **Workable:** 29 tokens (new, scraper not yet built)
+- **Not scraped:** Gem (Nominal), Comeet (Darrow), custom career pages
 
-**Root cause:** Stage 0 only matched `LIKE '<%'`, missing entity-encoded `&lt;%`. The `html_to_markdown()` function didn't strip base64 data URIs.
-
-**Fix:**
-- `html_to_markdown()` now calls `html.unescape()` + strips `<img src="data:...">` tags
-- Stage 0 matches both `'<%'` and `'&lt;%'` prefixes
-- New `strip_data_uris()` for markdown-format base64 cleanup
-- `MAX_DESC_CHARS = 30_000` truncation guard in embeddings.py
-- DB impact: max description 1,832,407 → 19,611 chars; avg 10,330 → 5,709 chars
-
-### 2. Embedding Model Swap (kerf: `embed-model`, SQUARE)
-**Problem:** fastembed (ONNX Runtime) can't GPU-accelerate RoPE-based models on Apple Silicon. CoreML execution provider doesn't support rotary position embeddings. Long-context models (jina, nomic) fell back to CPU → OOM or unusably slow.
-
-**Root cause:** Architectural mismatch between ONNX/CoreML and modern transformer position encodings.
-
-**Fix:** Replaced fastembed with `mlx-embedding-models` (Apple MLX framework). Same models, native Metal GPU.
-- Description model: jina 512d → nomic-v1.5 768d (original spec model)
-- Backend: fastembed TextEmbedding → MLX EmbeddingModel (Metal GPU)
-- SEQ_LENS monkey-patch for nomic's 2048-token context
-- Cross-encoder reranker stays on fastembed (not available in MLX)
-- `vec_meta` table tracks dimensions, auto-migrates on model change
-- Benchmarks: BGE-small 13ms/doc, nomic 307ms/doc (vs minutes+ on ONNX CPU)
-
-### 3. Spec Synchronization (kerf: `spec-sync`, SQUARE)
-All 4 specs (00, 01, 05, 06) updated to match implemented code:
-- Spec 01: Added missing modules, CLI commands, pipeline stages, util functions
-- Spec 05: Claude CLI backend (was Agent SDK), batch params, llm_filter, dep names
-- Spec 06: vec_meta migration, method defaults, MLX backend references
-- Spec 00: Removed stale claude-agent-sdk reference
+### Key Lessons from Research
+- Standard ATS boards over-represent devtools, fintech, and enterprise SaaS
+- "AI + physical world" searches pull toward robotics (wrong) — need platform/data layer
+- On-site/hybrid blocks many otherwise-interesting companies — filter remote-first early
+- User's skillset is backend systems, data platforms, APIs, business logic — NOT robotics, CV, embedded, materials science
+- FP stacks (Elixir, Haskell, Rust, Scala, OCaml) are a strong positive signal but can't save a bad domain fit
+- The flywheel framework (Value → Lever → Compound → More Value) is the best discriminator
 
 ---
 
-## Embedding Performance (M4 Mac Mini, 16GB)
+## What Was Done This Session (2026-04-10 through 2026-04-14)
 
-| Model | Role | Dims | Backend | Per-doc | Batch 32 |
-|-------|------|------|---------|---------|----------|
-| BGE-small-en-v1.5 | Summary | 384 | MLX Metal | 13ms | 0.3s |
-| nomic-embed-text-v1.5 | Description | 768 | MLX Metal | 307ms | 9.8s |
-| ms-marco-MiniLM-L-6-v2 | Re-ranker | n/a | fastembed ONNX | per-query | per-query |
+### Company Research
+- Ran 10+ semantic vector searches across the job database
+- Spawned 8 research agents covering: LLM-compounds-product, FP languages, ATS tokens, broad discovery, Workable tokens, AI-first, Rust/systems, remote-first
+- Created 6 batch review files with 100+ companies researched
+- User reviewed batches 1-3 (35 companies with detailed feedback) and batch 4 (18 companies, all robotics misses)
+- Established pipeline structure and pass-pattern documentation
 
-Full embedding run: 4,292 jobs in 15.6 minutes, steady 1,748MB RSS.
+### Infrastructure
+- Added ~100 new ATS tokens across 4 platforms
+- Created `tokens/workable.txt` with 29 Workable tokens
+- Wrote Workable scraper spec (`specs/07-workable-scraper.md`)
+- Moved research to tracked `company-research/` directory
+- Updated CLAUDE.md with research pipeline docs
+- Created private GitHub repo and pushed: https://github.com/gregberns/job-board-search
 
 ---
-
-## Kerf Works
-
-| Work | Jig | Status | Location |
-|------|-----|--------|----------|
-| `vector-search` | spec | ready | `~/.kerf/projects/job-board-search/vector-search/` |
-| `desc-cleanup` | bug | ready | `~/.kerf/projects/job-board-search/desc-cleanup/` |
-| `embed-model` | plan | ready | `~/.kerf/projects/job-board-search/embed-model/` |
-| `spec-sync` | plan | ready | `~/.kerf/projects/job-board-search/spec-sync/` |
 
 ## Specs
 
 All specs in `specs/`, **in sync with code** as of 2026-04-10:
 - 00-overview, 01-architecture, 02-data-model, 03-cli-ux
 - 04-search-ranking, 05-enrichment, 06-vector-search
+- 07-workable-scraper (new, not yet implemented)
 - hn-careers-pipeline
 
-## Known Issues (pre-existing)
+## Known Issues
 - Salary regex overmatch on some Greenhouse postings
 - Some company names are slug-derived
 - `jbs tokens validate` not tested end-to-end
 - `jbs tokens discover` not tested end-to-end
 - mlx-embedding-models progress bars are noisy (tqdm output during search)
+- Workable scraper not yet built (spec ready)
+- Many new tokens not yet scraped (added 2026-04-13, last scrape 2026-04-09)
 
 ## Development Process
 
